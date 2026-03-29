@@ -1,31 +1,10 @@
-#[repr(u8)]
-enum Side {
-    Bid,
-    Ask
-}
+mod telemetry;
+mod events;
+mod order;
+mod enums;
 
-#[repr(u8)]
-enum  OrderType {
-    Limit,
-    Market
-}
+pub use enums::*;
+pub use events::*;
+pub use order::*;
 
-#[repr(u8)]
-enum TimeInForce {
-    GTC,
-    IOC,
-    FOK
-}
-
-
-struct Order {
-
-}
-
-struct L2Update {
-
-}
-
-struct OrderEvent {
-
-}
+pub const PRICE_SCALE: u64 = 100_000_000;
