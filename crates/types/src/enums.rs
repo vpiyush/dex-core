@@ -3,54 +3,41 @@ use bytemuck::{NoUninit, CheckedBitPattern};
 #[repr(u8)]
 #[derive(NoUninit, CheckedBitPattern, Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Side {
-    Bid,
-    Ask
+    Bid = 0,
+    Ask = 1
 }
 
 #[repr(u8)]
 #[derive(NoUninit, CheckedBitPattern, Copy, Clone, PartialEq, Eq, Debug)]
 pub enum  OrderType {
-    Limit,
-    Market
+    Limit = 0,
+    Market = 1
 }
 
 #[repr(u8)]
 #[derive(NoUninit, CheckedBitPattern, Copy, Clone, PartialEq, Eq, Debug)]
 pub enum TimeInForce {
-    GTC,
-    IOC,
-    FOK
+    GTC = 0,
+    IOC = 1,
+    FOK = 2
 }
 
 #[repr(u8)]
 #[derive(NoUninit, CheckedBitPattern, Copy, Clone, PartialEq, Eq, Debug)]
 pub enum RequestType {
-    New,
-    Cancel,
-    Amend
+    New = 0,
+    Cancel = 1,
+    Amend = 2
 }
 
 #[repr(u8)]
 #[derive(NoUninit, CheckedBitPattern, Copy, Clone, PartialEq, Eq, Debug)]
 pub enum RejectReason {
-    InsufficientBalance, // spot balance too low
-    InsufficientMargin, // margin requirement not met
-    PositionLimitExceeded, // position size limit reached
-    RateLimitExceeded, // order rate too high
-    InvalidPrice, // price out of valid range
-    InvalidQuantity, // quantity zero or invalid
-    UnknownInstrument // unknown trading pair
+    InsufficientBalance = 0, // spot balance too low
+    InsufficientMargin = 1, // margin requirement not met
+    PositionLimitExceeded = 2, // position size limit reached
+    RateLimitExceeded = 3, // order rate too high
+    InvalidPrice = 4, // price out of valid range
+    InvalidQuantity = 5, // quantity zero or invalid
+    UnknownInstrument = 6 // unknown trading pair
 }
-
-
-#[repr(C)]
-#[derive(NoUninit, CheckedBitPattern, Copy, Clone, PartialEq,  Debug)]
-pub struct L2Update {
-    price: u64,
-    quantity: u64,
-    timestamp: u64,
-    instrument_id: u32,
-    side: Side,
-    _padding: [u8; 3]
-}
-

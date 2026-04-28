@@ -1,7 +1,7 @@
 use bytemuck::{NoUninit, CheckedBitPattern};
 #[repr(C)]
 #[derive(NoUninit, CheckedBitPattern, Copy, Clone, PartialEq,  Debug)]
-struct TimingDelta {
+pub struct TimingDelta {
     origin_ts: u64,
     current_ts: u64,
     publisher_id: u32,

@@ -23,3 +23,16 @@ pub enum OrderEvent {
         reason: RejectReason
     }
 }
+
+// Returned when wire format tag bytes doesn't map to a known variant
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidTag(pub u8);
+
+use bytemuck::{Pod, Zeroable};
+#[repr(C)]
+#[derive(Pod, Zeroable, Copy, Debug, Clone, PartialEq)]
+pub struct PodOrderEvent {
+    tag: u8,
+    _pad: [u8; 7],
+    payload: [u8; 40]
+}
