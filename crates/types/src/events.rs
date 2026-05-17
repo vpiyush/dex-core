@@ -122,3 +122,65 @@ impl TryFrom<PodOrderEvent> for OrderEvent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Side, OrderType, TimeInForce};
+
+    // helper to build fully populated order
+    fn sample_order() -> Order {
+        Order {
+            id: 0xDEAD_BEEF_CAFE_BABE,
+            price: 12345_00000000,
+            quantity: 1_1000,
+            timestamp: 999_999_999,
+            instrument_id: 42,
+            side: Side::Ask,
+            order_type: OrderType::Market,
+            tif: TimeInForce::IOC,
+            _padding: 0
+        }
+    }
+
+    #[test]
+    fn fill_round_trip() {
+        let original = OrderEvent::Fill {id: 42, fill_qty: 100, fill_price: 50_000};
+        let pod: PodOrderEvent = original.clone().into();
+        assert_eq!(pod.tag, 1, "Fill tag must be 1");
+        let back: OrderEvent = pod.try_into().expect("Failed to convert back to OrderEvent");
+        assert_eq!(original, back);
+    }
+
+    #[test]
+    fn new_round_trip_preserves_all_enum_fields() {
+        // The risky variant: all three enum fields in Order must survive the
+        // bytes_of → 40-byte payload → aligned-buffer → checked::try_from_bytes path.
+        let original = OrderEvent::New(sample_order());
+        let pod: PodOrderEvent = original.clone().into();
+        assert_eq!(pod.tag, 0);
+        let back: OrderEvent = pod.try_into().unwrap();
+        assert_eq!(original, back);
+    }
+
+    #[test]
+    fn cancel_zeros_unused_payload_bytes() {
+        // Cancel uses only payload[0..8]; bytes 8..40 must be zero, not stack garbage.
+        let pod: PodOrderEvent = OrderEvent::Cancel { id: 7 }.into();
+        for (i, b) in pod.payload[8..].iter().enumerate() {
+            assert_eq!(*b, 0, "byte {} of unused payload was {}, not 0", 8 + i, b);
+        }
+    }
+
+    #[test]
+    fn unknown_tag_returns_err() {
+        // Construct a PodOrderEvent with a tag bytemuck would accept (any u8 is valid)
+        // but our TryFrom should reject.
+        let pod = PodOrderEvent { tag: 99, _pad: [0; 7], payload: [0; 40] };
+        match OrderEvent::try_from(pod) {
+            Err(InvalidTag(99)) => (),
+            other => panic!("expected InvalidTag(99), got {:?}", other),
+        }
+    }
+
+}

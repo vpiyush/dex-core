@@ -7,15 +7,15 @@ use crate::RequestType;
 #[repr(C)]
 #[derive(NoUninit, CheckedBitPattern, Copy, Clone, PartialEq,  Debug)]
 pub struct Order {
-    id: u64,
-    price: u64,
-    quantity: u64,
-    timestamp: u64,
-    instrument_id: u32,
-    side: Side,
-    order_type: OrderType,
-    tif: TimeInForce,
-    _padding: u8
+    pub id: u64,
+    pub price: u64,
+    pub quantity: u64,
+    pub timestamp: u64,
+    pub instrument_id: u32,
+    pub side: Side,
+    pub order_type: OrderType,
+    pub tif: TimeInForce,
+    pub  _padding: u8
 }
 
 #[repr(C)]
