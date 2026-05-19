@@ -390,7 +390,7 @@ mod tests {
             id: 1,
             price: 100,
             quantity: 1,
-            timestamp: 0,
+            origin_ts: 0,
             instrument_id: 0,
             side: Side::Ask,
             order_type: OrderType::Market,

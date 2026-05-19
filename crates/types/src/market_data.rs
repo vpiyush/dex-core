@@ -6,7 +6,7 @@ use crate::Side;
 pub struct L2Update {
     price: u64,
     quantity: u64,
-    timestamp: u64,
+    origin_ts: u64,
     instrument_id: u32,
     side: Side,
     _padding: [u8; 3]

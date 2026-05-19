@@ -36,8 +36,10 @@ const _: () = assert!(size_of::<RequestType>() == 1);
 const _: () = assert!(size_of::<RejectReason>() == 1);
 
 
-const _: () = assert!(size_of::<PodOrderEvent>() == 48);
+// PodOrderEvent grew from 48 → 56 bytes in v1.1 LLD amendment (added origin_ts
+// header field). Alignment changed from 1 → 8 because of the u64 field.
+const _: () = assert!(size_of::<PodOrderEvent>() == 56);
 const _: () = assert!(size_of::<PodPosition>() == 24);
 
-const _: () = assert!(align_of::<PodOrderEvent>() == 1);
+const _: () = assert!(align_of::<PodOrderEvent>() == 8);
 const _: () = assert!(align_of::<PodPosition>() == 8);
