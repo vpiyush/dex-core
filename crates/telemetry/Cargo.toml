@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
+default = ["protocol", "actor", "histogram"]
+histogram = ["dep:hdrhistogram"]
+protocol = ["dep:types"]
+actor = ["protocol"]
+primitives-only = []
 
 [dependencies]
 types = {path = "../types", optional = true}
