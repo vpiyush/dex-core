@@ -6,6 +6,7 @@ mod order;
 mod enums;
 mod position;
 mod market_data;
+mod ids;
 
 pub use enums::*;
 pub use events::*;
@@ -13,12 +14,13 @@ pub use order::*;
 pub use position::*;
 pub use market_data::*;
 pub use telemetry::*;
+pub use ids::*;
 
 pub const PRICE_SCALE: u64 = 100_000_000;
 
 // Size assertions — exact byte counts from LLD §4
-const _: () = assert!(size_of::<Order>() == 40);
-const _: () = assert!(size_of::<OrderRequest>() == 40);
+const _: () = assert!(size_of::<Order>() == 72);
+const _: () = assert!(size_of::<OrderRequest>() == 64);
 const _: () = assert!(size_of::<L2Update>() == 32);
 const _: () = assert!(size_of::<TimingDelta>() == 24);
 
@@ -36,9 +38,10 @@ const _: () = assert!(size_of::<RequestType>() == 1);
 const _: () = assert!(size_of::<RejectReason>() == 1);
 
 
-// PodOrderEvent grew from 48 → 56 bytes in v1.1 LLD amendment (added origin_ts
-// header field). Alignment changed from 1 → 8 because of the u64 field.
-const _: () = assert!(size_of::<PodOrderEvent>() == 56);
+// PodOrderEvent size history:
+//   48 B → 56 B (v1.1 added origin_ts header; alignment 1 → 8)
+//   56 B → 88 B (Order payload grew from 40 → 72 B with intent_hash addition)
+const _: () = assert!(size_of::<PodOrderEvent>() == 88);
 const _: () = assert!(size_of::<PodPosition>() == 24);
 
 const _: () = assert!(align_of::<PodOrderEvent>() == 8);

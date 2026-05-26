@@ -39,7 +39,7 @@ pub struct PodOrderEvent {
     tag: u8,
     _pad: [u8; 7],
     origin_ts: u64,
-    payload: [u8; 40]
+    payload: [u8; 72]   // Sized to hold the largest variant payload: Order (72 B).
 }
 
 impl From<OrderEvent> for PodOrderEvent {
@@ -95,8 +95,8 @@ impl TryFrom<PodOrderEvent> for OrderEvent {
                 // Order has alignment 8; copy payload into an 8-aligned buffer
                 // before checked::try_from_bytes.
                 #[repr(C, align(8))]
-                struct OrderAligned([u8; 40]);
-                let mut buf = OrderAligned([0u8; 40]);
+                struct OrderAligned([u8; 72]);
+                let mut buf = OrderAligned([0u8; 72]);
                 buf.0.copy_from_slice(&value.payload);
                 let order:&Order = bytemuck::checked::try_from_bytes::<Order>(&buf.0)
                     .map_err(|_| InvalidTag(0))?;
@@ -137,12 +137,12 @@ impl TryFrom<PodOrderEvent> for OrderEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Side, OrderType, TimeInForce};
+    use crate::{Side, OrderType, TimeInForce, OrderId, IntentHash};
 
     // helper to build fully populated order
     fn sample_order() -> Order {
         Order {
-            id: 0xDEAD_BEEF_CAFE_BABE,
+            order_id: OrderId(0xDEAD_BEEF_CAFE_BABE),
             price: 12345_00000000,
             quantity: 1_1000,
             origin_ts: 999_999_999,
@@ -150,7 +150,8 @@ mod tests {
             side: Side::Ask,
             order_type: OrderType::Market,
             tif: TimeInForce::IOC,
-            _padding: 0
+            _padding: 0,
+            intent_hash: IntentHash::zeroed(),
         }
     }
 
@@ -191,7 +192,7 @@ mod tests {
     fn unknown_tag_returns_err() {
         // Construct a PodOrderEvent with a tag bytemuck would accept (any u8 is valid)
         // but our TryFrom should reject.
-        let pod = PodOrderEvent { tag: 99, _pad: [0; 7], origin_ts: 0, payload: [0; 40] };
+        let pod = PodOrderEvent { tag: 99, _pad: [0; 7], origin_ts: 0, payload: [0; 72] };
         match OrderEvent::try_from(pod) {
             Err(InvalidTag(99)) => (),
             other => panic!("expected InvalidTag(99), got {:?}", other),
@@ -199,9 +200,11 @@ mod tests {
     }
 
     #[test]
-    fn pod_order_event_size_is_56_bytes() {
-        // Wire format invariant per types LLD §4.3 v1.1 amendment.
-        assert_eq!(core::mem::size_of::<PodOrderEvent>(), 56);
+    fn pod_order_event_size_is_88_bytes() {
+        // Wire format size grew from 56 → 88 B when Order grew from 40 → 72 B
+        // (added intent_hash: [u8; 32] per orderbook/matcher LLDs).
+        // Layout: tag(1) + _pad(7) + origin_ts(8) + payload(72) = 88 B, align 8.
+        assert_eq!(core::mem::size_of::<PodOrderEvent>(), 88);
         assert_eq!(core::mem::align_of::<PodOrderEvent>(), 8);
     }
 

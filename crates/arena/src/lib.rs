@@ -197,6 +197,8 @@ impl<T> Slot<T>{
 
 #[cfg(test)]
 mod tests {
+    use bytemuck::Zeroable;
+    use types::{IntentHash, OrderId};
     use super::*;
 
     // ----- §12.1 Round-trip and basic operations --------------------------------
@@ -387,7 +389,7 @@ mod tests {
         use types::{Order, Side, OrderType, TimeInForce};
         let mut a = Arena::<Order>::new(2);
         let order = Order {
-            id: 1,
+            order_id: OrderId(1),
             price: 100,
             quantity: 1,
             origin_ts: 0,
@@ -396,6 +398,7 @@ mod tests {
             order_type: OrderType::Market,
             tif: TimeInForce::IOC,
             _padding: 0,
+            intent_hash: IntentHash::zeroed()
         };
         let i = a.alloc(order).unwrap();
         assert!(a.get(i).is_some(), "Arena<Order> alloc/get round-trip failed");

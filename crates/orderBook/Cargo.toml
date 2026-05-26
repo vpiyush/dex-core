@@ -1,18 +1,21 @@
+
 [package]
-name = "arena"
+name = "orderBook"
 version = "0.1.0"
 edition = "2024"
 
-
 [dependencies]
 types = {path = "../types"}
+arena = {path = "../arena"}
+rustc-hash = "2.1.2"
 bytemuck = "1.25.0"
 
 [dev-dependencies]
+proptest = "1"
 criterion = {version = "0.8.2", features = ["html_reports"]}
-telemetry = {path = "../telemetry", features = ["primitives-only", "histogram"]}
+telemetry = {path = "../telemetry", features = ["histogram"]}
 
 [[bench]]
-name = "arena_bench"
+name = "orderbook_bench"
 harness = false
 
