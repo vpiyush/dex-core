@@ -17,11 +17,11 @@ pub struct TopView <'a>{
 }
 
 pub struct OrderBook {
-    instrument_id: u32,
-    arena: Arena<Order>,
-    bids: BTreeMap<u64,PriceLevel>,
-    asks: BTreeMap<u64,PriceLevel>,
-    index: FxHashMap<IntentHash, ArenaIdx>,
+    pub(crate) instrument_id: u32,
+    pub(crate) arena: Arena<Order>,
+    pub(crate) bids: BTreeMap<u64,PriceLevel>,
+    pub(crate) asks: BTreeMap<u64,PriceLevel>,
+    pub(crate) index: FxHashMap<IntentHash, ArenaIdx>,
 }
 
 impl OrderBook {
@@ -105,6 +105,10 @@ impl OrderBook {
         level.total_qty += order.quantity;
 
         self.index.insert(order.intent_hash, arena_idx);
+
+        #[cfg(debug_assertions)]
+        crate::invariants::assert_invariants(self);
+
         Ok(arena_idx)
     }
 
@@ -127,6 +131,10 @@ impl OrderBook {
         if is_empty {
             level_map.remove(&order.price);
         }
+
+        #[cfg(debug_assertions)]
+        crate::invariants::assert_invariants(self);
+
         Some(order)
     }
 
@@ -155,6 +163,10 @@ impl OrderBook {
             level_map.remove(&price);
         }
         self.index.remove(&order.intent_hash);
+
+        #[cfg(debug_assertions)]
+        crate::invariants::assert_invariants(self);
+
         Some(order)
     }
 
@@ -181,6 +193,9 @@ impl OrderBook {
         debug_assert!(qty < order.quantity, "invariant: reduce top called with full qty, use pop_top for full consumption");
         order.quantity -= qty;
         level.total_qty -= qty;
+
+        #[cfg(debug_assertions)]
+        crate::invariants::assert_invariants(self);
     }
 }
 
@@ -412,5 +427,18 @@ mod tests {
         book.reduce_top(Side::Bid, 10);
     }
 
+    // ----- meta-test: the invariants checker actually catches violations -----
+
+    #[test]
+    #[should_panic(expected = "I2 violated")]
+    fn invariant_check_catches_total_qty_drift() {
+        // Deliberately desync level.total_qty from the actual sum, then call
+        // the checker directly. The panic message must name I2.
+        let mut book = OrderBook::new(1, 64);
+        book.insert(make_order(100, 10, Side::Bid, 1)).unwrap();
+        let level = book.bids.get_mut(&100).unwrap();
+        level.total_qty = 999;
+        crate::invariants::assert_invariants(&book);
+    }
 }
 
