@@ -39,5 +39,8 @@ pub enum RejectReason {
     RateLimitExceeded = 3, // order rate too high
     InvalidPrice = 4, // price out of valid range
     InvalidQuantity = 5, // quantity zero or invalid
-    UnknownInstrument = 6 // unknown trading pair
+    UnknownInstrument = 6, // unknown trading pair
+    UnknownOrder = 7, // unknown order type
+    SystemAtCapacity = 8, // system is overloaded
+    InsufficientLiquidity = 9 // not enough liquidity to fullfill the order
 }

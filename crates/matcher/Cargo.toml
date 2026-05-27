@@ -1,0 +1,13 @@
+[package]
+name = "matcher"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+types = {path = "../types"}
+arena = {path = "../arena"}
+orderbook = {path = "../orderbook"}
+rustc-hash = "2.1.2"
+
+[dev-dependencies]
+telemetry = {path = "../telemetry", features = ["histogram"]}

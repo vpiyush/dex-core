@@ -1,4 +1,4 @@
-use crate::Order;
+use crate::{IntentHash, Order};
 use crate::RejectReason;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -9,6 +9,7 @@ pub enum OrderEvent {
         fill_qty: u64,
         fill_price: u64,
         origin_ts: u64,
+        intent_hash: IntentHash,
     },
     PartialFill {
         id: u64,
@@ -16,15 +17,18 @@ pub enum OrderEvent {
         fill_price: u64,
         remaining_qty: u64,
         origin_ts: u64,
+        intent_hash: IntentHash,
     },
     Cancel {
         id: u64,
         origin_ts: u64,
+        intent_hash: IntentHash,
     },
     Reject {
         id: u64,
         reason: RejectReason,
         origin_ts: u64,
+        intent_hash: IntentHash,
     }
 }
 
@@ -51,31 +55,35 @@ impl From<OrderEvent> for PodOrderEvent {
                 pod_order.origin_ts = order.origin_ts;
                 pod_order.payload.copy_from_slice(bytemuck::bytes_of(&order));
             }
-            OrderEvent::Fill { id, fill_qty, fill_price, origin_ts } => {
+            OrderEvent::Fill { id, fill_qty, fill_price, origin_ts, intent_hash } => {
                 pod_order.tag = 1;
                 pod_order.origin_ts = origin_ts;
                 pod_order.payload[0..8].copy_from_slice(&id.to_ne_bytes());
                 pod_order.payload[8..16].copy_from_slice(&fill_qty.to_ne_bytes());
                 pod_order.payload[16..24].copy_from_slice(&fill_price.to_ne_bytes());
+                pod_order.payload[24..56].copy_from_slice(&intent_hash.0);
             }
-            OrderEvent::PartialFill { id, fill_qty, fill_price, remaining_qty, origin_ts } => {
+            OrderEvent::PartialFill { id, fill_qty, fill_price, remaining_qty, origin_ts, intent_hash } => {
                 pod_order.tag = 2;
                 pod_order.origin_ts = origin_ts;
                 pod_order.payload[0..8].copy_from_slice(&id.to_ne_bytes());
                 pod_order.payload[8..16].copy_from_slice(&fill_qty.to_ne_bytes());
                 pod_order.payload[16..24].copy_from_slice(&fill_price.to_ne_bytes());
                 pod_order.payload[24..32].copy_from_slice(&remaining_qty.to_ne_bytes());
+                pod_order.payload[32..64].copy_from_slice(&intent_hash.0);
             }
-            OrderEvent::Cancel { id, origin_ts } => {
+            OrderEvent::Cancel { id, origin_ts, intent_hash } => {
                 pod_order.tag = 3;
                 pod_order.origin_ts = origin_ts;
                 pod_order.payload[0..8].copy_from_slice(&id.to_ne_bytes());
+                pod_order.payload[8..40].copy_from_slice(&intent_hash.0);
             }
-            OrderEvent::Reject { id, reason, origin_ts } => {
+            OrderEvent::Reject { id, reason, origin_ts, intent_hash } => {
                 pod_order.tag = 4;
                 pod_order.origin_ts = origin_ts;
                 pod_order.payload[0..8].copy_from_slice(&id.to_ne_bytes());
-                pod_order.payload[8] = reason as u8;
+                pod_order.payload[8..40].copy_from_slice(&intent_hash.0);
+                pod_order.payload[40] = reason as u8;
             }
         }
         pod_order
@@ -89,6 +97,11 @@ impl TryFrom<PodOrderEvent> for OrderEvent {
             let mut buf = [0u8; 8];
             buf.copy_from_slice(&value.payload[offset..offset+8]);
             u64::from_ne_bytes(buf)
+        };
+        let read_intent_hash = |offset: usize| -> IntentHash {
+            let mut buf = [0u8; 32];
+            buf.copy_from_slice(&value.payload[offset..offset+32]);
+            IntentHash(buf)
         };
         match value.tag {
             0 => {
@@ -107,6 +120,7 @@ impl TryFrom<PodOrderEvent> for OrderEvent {
                 fill_qty: read_u64(8),
                 fill_price: read_u64(16),
                 origin_ts: value.origin_ts,
+                intent_hash: read_intent_hash(24),
             }),
             2 => Ok(OrderEvent::PartialFill {
                 id: read_u64(0),
@@ -114,19 +128,22 @@ impl TryFrom<PodOrderEvent> for OrderEvent {
                 fill_price: read_u64(16),
                 remaining_qty: read_u64(24),
                 origin_ts: value.origin_ts,
+                intent_hash: read_intent_hash(32),
             }),
             3 => Ok(OrderEvent::Cancel {
                 id: read_u64(0),
                 origin_ts: value.origin_ts,
+                intent_hash: read_intent_hash(8),
             }),
             4 => {
-                let reason_byte = value.payload[8];
-                let reason: &RejectReason = bytemuck::checked::try_from_bytes::<RejectReason>(&value.payload[8..9])
+                let reason_byte = value.payload[40];
+                let reason: &RejectReason = bytemuck::checked::try_from_bytes::<RejectReason>(&value.payload[40..41])
                     .map_err(|_| InvalidTag(reason_byte))?;
                 Ok(OrderEvent::Reject {
                     id: read_u64(0),
                     reason: *reason,
                     origin_ts: value.origin_ts,
+                    intent_hash: read_intent_hash(8),
                 })
             }
             _ => Err(InvalidTag(value.tag)),
@@ -159,6 +176,7 @@ mod tests {
     fn fill_round_trip() {
         let original = OrderEvent::Fill {
             id: 42, fill_qty: 100, fill_price: 50_000, origin_ts: 7_777_777,
+            intent_hash: IntentHash([0xAB; 32]),
         };
         let pod: PodOrderEvent = original.clone().into();
         assert_eq!(pod.tag, 1, "Fill tag must be 1");
@@ -181,10 +199,13 @@ mod tests {
 
     #[test]
     fn cancel_zeros_unused_payload_bytes() {
-        // Cancel uses only payload[0..8]; bytes 8..40 must be zero, not stack garbage.
-        let pod: PodOrderEvent = OrderEvent::Cancel { id: 7, origin_ts: 1 }.into();
-        for (i, b) in pod.payload[8..].iter().enumerate() {
-            assert_eq!(*b, 0, "byte {} of unused payload was {}, not 0", 8 + i, b);
+        // Cancel uses payload[0..40] (id + intent_hash); bytes 40..72 must be zero,
+        // not stack garbage. Use a zero intent_hash so the whole tail must be zero.
+        let pod: PodOrderEvent = OrderEvent::Cancel {
+            id: 7, origin_ts: 1, intent_hash: IntentHash([0u8; 32]),
+        }.into();
+        for (i, b) in pod.payload[40..].iter().enumerate() {
+            assert_eq!(*b, 0, "byte {} of unused payload was {}, not 0", 40 + i, b);
         }
     }
 
@@ -209,10 +230,29 @@ mod tests {
     }
 
     #[test]
+    fn intent_hash_round_trips_for_every_variant() {
+        // Non-zero hash so a serialize/deserialize bug that drops it on the floor
+        // cannot pass by accident.
+        let hash = IntentHash([0x5A; 32]);
+        let cases = [
+            OrderEvent::Fill { id: 1, fill_qty: 2, fill_price: 3, origin_ts: 4, intent_hash: hash },
+            OrderEvent::PartialFill { id: 1, fill_qty: 2, fill_price: 3, remaining_qty: 4, origin_ts: 5, intent_hash: hash },
+            OrderEvent::Cancel { id: 1, origin_ts: 2, intent_hash: hash },
+            OrderEvent::Reject { id: 1, reason: RejectReason::InvalidPrice, origin_ts: 2, intent_hash: hash },
+        ];
+        for original in cases {
+            let pod: PodOrderEvent = original.clone().into();
+            let back: OrderEvent = pod.try_into().unwrap();
+            assert_eq!(back, original, "intent_hash round-trip failed for {:?}", original);
+        }
+    }
+
+    #[test]
     fn fill_origin_ts_propagates_round_trip() {
         // origin_ts must survive a Fill round-trip independent of payload contents.
         let original = OrderEvent::Fill {
             id: 1, fill_qty: 1, fill_price: 1, origin_ts: 0xCAFE_F00D_BABE_BEEF,
+            intent_hash: IntentHash([0u8; 32]),
         };
         let pod: PodOrderEvent = original.clone().into();
         let back: OrderEvent = pod.try_into().unwrap();
