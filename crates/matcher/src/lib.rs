@@ -5,3 +5,10 @@
 //! stream to a caller supplied buffer
 //!
 //! See `docs/lld/matcher.md` for the design.
+
+mod engine;
+mod matching;
+mod events;
+mod invariants;
+
+pub use engine::*;
