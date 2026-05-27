@@ -40,7 +40,7 @@ pub enum RejectReason {
     InvalidPrice = 4, // price out of valid range
     InvalidQuantity = 5, // quantity zero or invalid
     UnknownInstrument = 6, // unknown trading pair
-    UnknownOrder = 7, // unknown order type
+    UnknownOrder = 7, // no order with this intent_hash exists
     SystemAtCapacity = 8, // system is overloaded
     InsufficientLiquidity = 9 // not enough liquidity to fullfill the order
 }

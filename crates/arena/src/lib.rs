@@ -1,3 +1,25 @@
+//! Generational arena for stable slot-based storage on the hot path.
+//!
+//! [`Arena<T>`] owns a fixed-size `Box<[Slot<T>]>` of slots. Allocation returns
+//! an [`ArenaIdx`] that pairs `(slot, generation)`; the generation bumps on
+//! every `remove`, so stale handles to reused slots are detected and return
+//! `None` from `get`/`remove` instead of aliasing fresh data.
+//!
+//! Two design choices matter for the rest of the workspace:
+//!
+//! * The backing storage is a `Box<[Slot<T>]>` rather than a `Vec<T>` so the
+//!   slots never move — references handed out via `get` stay valid even when
+//!   nearby slots are allocated or freed.
+//! * The free list is intrusive: unoccupied slots' `MaybeUninit<T>` storage
+//!   is reinterpreted as a `u32` "next free index" via raw pointer reads.
+//!   This is why the `ASSERT_T_LAYOUT` const requires `T` to be `>= 4 bytes`
+//!   and `>= 4-byte aligned`.
+//!
+//! Used by [`orderbook`](../orderbook/index.html) to store live `Order` records
+//! keyed by stable indices that price-level FIFOs hold across re-allocation.
+//!
+//! See `docs/lld/arena.md` for the full design.
+
 // Arena Idx is the Index of the slot in the arena. It also holds the generation
 // to avoid acting on stale entries.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]

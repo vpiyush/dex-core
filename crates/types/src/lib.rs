@@ -1,3 +1,19 @@
+//! Foundational domain types shared across the dex-core workspace.
+//!
+//! Owns the trading data plane: [`Order`], [`OrderRequest`], [`OrderEvent`],
+//! the enums ([`Side`], [`OrderType`], [`TimeInForce`], [`RequestType`],
+//! [`RejectReason`]), and the universal anchor [`IntentHash`].
+//!
+//! Every type that crosses a process boundary has a `#[repr(C)]` layout and
+//! either implements `bytemuck::Pod` (fixed-size structs) or has a hand-rolled
+//! tagged-union wire form ([`PodOrderEvent`]) for zero-copy serialization.
+//!
+//! Size and alignment of wire-format types are pinned by `const _` assertions
+//! at the bottom of this file — changes will fail to compile rather than
+//! silently break the IPC layer.
+//!
+//! See `docs/lld/types.md` for the full design.
+
 use core::mem::{size_of, align_of};
 
 mod telemetry;
