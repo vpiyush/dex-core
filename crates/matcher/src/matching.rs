@@ -43,7 +43,7 @@ pub fn match_limit(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out:
     while remaining > 0 {
         let (maker_price, maker_qty, maker_id, maker_intent)  = {
             // opposite side is empty
-            let Some(top) = book.pop_top(opposite) else {
+            let Some(top) = book.peek_top(opposite) else {
                 break
             };
             // no crossing
@@ -51,7 +51,7 @@ pub fn match_limit(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out:
                 break
             }
             // side is consumable
-            (top.price, top.quantity, top.order_id.0, top.intent_hash)
+            (top.price, top.order.quantity, top.order.order_id.0, top.order.intent_hash)
         };
 
         let fill_qty = remaining.min(maker_qty);
