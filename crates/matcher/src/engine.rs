@@ -61,6 +61,7 @@ impl Engine {
         #[cfg(debug_assertions)]
         assert_invariants(self);
     }
+
     fn process_new(&mut self, req: &OrderRequest, out: &mut Vec<OrderEvent>) {
         // instrument exists
         if !self.books.contains_key(&req.instrument_id) {
