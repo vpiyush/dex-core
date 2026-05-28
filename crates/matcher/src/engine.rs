@@ -65,18 +65,18 @@ impl Engine {
     fn process_new(&mut self, req: &OrderRequest, out: &mut Vec<OrderEvent>) {
         // instrument exists
         if !self.books.contains_key(&req.instrument_id) {
-            push_reject(RejectReason::UnknownInstrument, req, out);
+            push_reject(RejectReason::UnknownInstrument, req.quantity, req, out);
             return;
         }
 
         // quantity check
         if req.quantity == 0 {
-            return push_reject(RejectReason::InvalidQuantity, req, out);
+            return push_reject(RejectReason::InvalidQuantity, req.quantity, req, out);
         };
 
         // price must be > 0 for limit orders, market orders will carry price 0 by convention
         if matches!(req.order_type, OrderType::Limit) && req.price == 0 {
-            return push_reject(RejectReason::InvalidPrice, req, out);
+            return push_reject(RejectReason::InvalidPrice, req.quantity, req, out);
         }
 
         // validation passed - burn an orderID
@@ -97,7 +97,8 @@ impl Engine {
     // process order cancel request
     fn process_cancel(&mut self, req: &OrderRequest, out: &mut Vec<OrderEvent>) {
         let Some(book) = self.books.get_mut(&req.instrument_id) else {
-            return push_reject(RejectReason::UnknownInstrument, req, out);
+            // Cancel-path reject: no fill semantics, remaining_qty = 0.
+            return push_reject(RejectReason::UnknownInstrument, 0, req, out);
         };
 
         match book.cancel(&req.intent_hash) {
@@ -105,7 +106,7 @@ impl Engine {
                 push_cancel(order.order_id.0, req, out)
             }
             None => {
-                push_reject(RejectReason::UnknownOrder, req, out)
+                push_reject(RejectReason::UnknownOrder, 0, req, out)
             }
         }
     }

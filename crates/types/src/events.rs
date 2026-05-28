@@ -27,6 +27,7 @@ pub enum OrderEvent {
     Reject {
         id: u64,
         reason: RejectReason,
+        remaining_qty: u64,
         origin_ts: u64,
         intent_hash: IntentHash,
     }
@@ -78,12 +79,13 @@ impl From<OrderEvent> for PodOrderEvent {
                 pod_order.payload[0..8].copy_from_slice(&id.to_ne_bytes());
                 pod_order.payload[8..40].copy_from_slice(&intent_hash.0);
             }
-            OrderEvent::Reject { id, reason, origin_ts, intent_hash } => {
+            OrderEvent::Reject { id, reason, remaining_qty, origin_ts, intent_hash } => {
                 pod_order.tag = 4;
                 pod_order.origin_ts = origin_ts;
                 pod_order.payload[0..8].copy_from_slice(&id.to_ne_bytes());
                 pod_order.payload[8..40].copy_from_slice(&intent_hash.0);
-                pod_order.payload[40] = reason as u8;
+                pod_order.payload[40..48].copy_from_slice(&remaining_qty.to_ne_bytes());
+                pod_order.payload[48] = reason as u8;
             }
         }
         pod_order
@@ -136,12 +138,13 @@ impl TryFrom<PodOrderEvent> for OrderEvent {
                 intent_hash: read_intent_hash(8),
             }),
             4 => {
-                let reason_byte = value.payload[40];
-                let reason: &RejectReason = bytemuck::checked::try_from_bytes::<RejectReason>(&value.payload[40..41])
+                let reason_byte = value.payload[48];
+                let reason: &RejectReason = bytemuck::checked::try_from_bytes::<RejectReason>(&value.payload[48..49])
                     .map_err(|_| InvalidTag(reason_byte))?;
                 Ok(OrderEvent::Reject {
                     id: read_u64(0),
                     reason: *reason,
+                    remaining_qty: read_u64(40),
                     origin_ts: value.origin_ts,
                     intent_hash: read_intent_hash(8),
                 })
@@ -238,7 +241,7 @@ mod tests {
             OrderEvent::Fill { id: 1, fill_qty: 2, fill_price: 3, origin_ts: 4, intent_hash: hash },
             OrderEvent::PartialFill { id: 1, fill_qty: 2, fill_price: 3, remaining_qty: 4, origin_ts: 5, intent_hash: hash },
             OrderEvent::Cancel { id: 1, origin_ts: 2, intent_hash: hash },
-            OrderEvent::Reject { id: 1, reason: RejectReason::InvalidPrice, origin_ts: 2, intent_hash: hash },
+            OrderEvent::Reject { id: 1, reason: RejectReason::InvalidPrice, remaining_qty: 7, origin_ts: 2, intent_hash: hash },
         ];
         for original in cases {
             let pod: PodOrderEvent = original.clone().into();

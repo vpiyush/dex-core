@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use arena::{Arena, ArenaIdx};
-use types::{IntentHash, Order, OrderId, Side};
+use types::{IntentHash, Order, Side};
 use crate::level::PriceLevel;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -202,7 +202,7 @@ impl OrderBook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types::{Side, OrderType, TimeInForce};
+    use types::{Side, OrderType, TimeInForce, OrderId};
 
     fn make_order(price: u64, qty: u64, side: Side, hash_byte: u8) -> Order {
         let mut hash = [0u8; 32];

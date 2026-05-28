@@ -10,7 +10,7 @@
 //! for aggressive crosses).
 //!
 //!
-use orderbook::{OrderBook, PriceLevel};
+use orderbook::{OrderBook};
 use types::{Order, OrderEvent, OrderId, OrderRequest, Side};
 
 /// match a limit order against the opposite side, then rest any residual.
@@ -34,8 +34,12 @@ use types::{Order, OrderEvent, OrderId, OrderRequest, Side};
 /// are O(1) per order.
 ///
 /// # known follow-up(improvement)
-/// if the remaining >= level.total_quantity, the whole level can be consumed at once
-/// reducing complexity to O(L Log L), try after benchmarks
+/// 1. if the remaining >= level.total_quantity, the whole level can be consumed at once
+///     reducing complexity to O(L Log L), try after benchmarks
+/// 2. pushing to out vector is not ideal from performance point of view, there are two
+///     possible alternatives.
+///     - direct use the seqlock ipc here, but increase coupling with different crate.
+///     - use an event sink, can caller can choose where it lands.
 ///
 pub fn match_limit(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out: &mut Vec<OrderEvent>) {
     let opposite = opposite(req.side);
@@ -47,7 +51,7 @@ pub fn match_limit(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out:
                 break
             };
             // no crossing
-            if !crossing(req.side, remaining, top.price) {
+            if !crossing(req.side, req.price, top.price) {
                 break
             }
             // side is consumable
@@ -120,8 +124,97 @@ pub fn match_limit(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out:
     }
 }
 
+/// match a market order against the opposing side until exhausted or no liquidity remains
+///
+/// # Algorithm — per-order cross loop
+///
+/// Identical to `match_limit` except:
+///   - No cross-condition check (market crosses any price).
+///   - No residual resting: if quantity remains after the opposing side
+///     is empty, emit `Reject{InsufficientLiquidity}`.
+///
+/// 1. Peek the opposing top. If `None` → break.
+/// 2. Fill `min(remaining, maker.qty)` at the maker's price.
+/// 3. Emit Fill/PartialFill for each side per the same rule as `match_limit`.
+/// 4. `pop_top` if maker fully consumed, else `reduce_top`.
+/// 5. Repeat until taker exhausted or opposing side empty.
+/// 6. If residual remains → emit `Reject{InsufficientLiquidity}`.
+///
+/// # Complexity
+///
+/// Same as `match_limit`: O(N log L) where N = resting orders consumed,
+/// L = levels on opposing side.
+///
 pub fn match_market(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out: &mut Vec<OrderEvent>) {
-    todo!("market matching: cross opposide side until exhausted or empty")
+    let opposite = opposite(req.side);
+    let mut remaining = req.quantity;
+
+    while remaining > 0 {
+        let (maker_price, maker_qty, maker_id, maker_intent) = {
+            let Some(top) = book.peek_top(opposite) else { break };
+            // No cross check — market accepts any price.
+            (top.price, top.order.quantity, top.order.order_id.0, top.order.intent_hash)
+        };
+
+        let fill_qty = remaining.min(maker_qty);
+        let fill_price = maker_price;
+        let maker_remaining = maker_qty - fill_qty;
+        remaining -= fill_qty;
+
+        // taker fill
+        if remaining == 0 {
+            out.push(OrderEvent::Fill {
+                id: order_id,
+                fill_qty,
+                fill_price,
+                origin_ts: req.origin_ts,
+                intent_hash: req.intent_hash,
+            });
+        } else {
+            out.push(OrderEvent::PartialFill {
+                id: order_id,
+                fill_qty,
+                fill_price,
+                remaining_qty: remaining,
+                origin_ts: req.origin_ts,
+                intent_hash: req.intent_hash,
+            });
+        }
+
+        // maker fill + book mutation
+        if maker_remaining == 0 {
+            out.push(OrderEvent::Fill {
+                id: maker_id,
+                fill_qty,
+                fill_price,
+                origin_ts: req.origin_ts,
+                intent_hash: maker_intent,
+            });
+            book.pop_top(opposite);
+        } else {
+            out.push(OrderEvent::PartialFill {
+                id: maker_id,
+                fill_qty,
+                fill_price,
+                remaining_qty: maker_remaining,
+                origin_ts: req.origin_ts,
+                intent_hash: maker_intent,
+            });
+            book.reduce_top(opposite, fill_qty);
+        }
+    }
+
+    // residual: market doesn't rest — reject what couldn't fill
+    if remaining > 0 {
+        out.push(OrderEvent::Reject {
+            id: 0,
+            reason: types::RejectReason::InsufficientLiquidity,
+            origin_ts: req.origin_ts,
+            remaining_qty: remaining,
+            intent_hash: req.intent_hash,
+        });
+    }
+
 }
 
 fn opposite(side: Side)-> Side {
