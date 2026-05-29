@@ -1,9 +1,9 @@
 use rustc_hash::FxHashMap;
 use orderbook::OrderBook;
-use types::{OrderEvent, OrderRequest, OrderType, RejectReason, RequestType};
+use types::{OrderEvent, OrderRequest, RejectReason, RequestType};
 use crate::events::{push_cancel, push_reject};
 use crate::invariants::assert_invariants;
-use crate::matching::{match_limit, match_market};
+use crate::matching::{match_limit};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum AddInstrumentError {
@@ -74,8 +74,8 @@ impl Engine {
             return push_reject(RejectReason::InvalidQuantity, req.quantity, req, out);
         };
 
-        // price must be > 0 for limit orders, market orders will carry price 0 by convention
-        if matches!(req.order_type, OrderType::Limit) && req.price == 0 {
+        // every order is a limit order; price must be > 0
+        if req.price == 0 {
             return push_reject(RejectReason::InvalidPrice, req.quantity, req, out);
         }
 
@@ -83,15 +83,7 @@ impl Engine {
         let order_id = self.mint_order_id();
         let book = self.books .get_mut(&req.instrument_id)
             .expect("invariant: book existence checked at step 1");
-
-        match req.order_type {
-            OrderType::Limit => {
-                match_limit(book, req, order_id, out);
-            }
-            OrderType::Market => {
-                match_market(book, req, order_id, out);
-            }
-        }
+        match_limit(book, req, order_id, out)
     }
 
     // process order cancel request
@@ -111,8 +103,217 @@ impl Engine {
         }
     }
 
-    fn process_amend(&mut self, req: &OrderRequest, out: &mut Vec<OrderEvent>) {
+    fn process_amend(&mut self, _req: &OrderRequest, _out: &mut Vec<OrderEvent>) {
         todo!("amend deferred to later")
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types::{IntentHash, Order, OrderType, Side, TimeInForce};
+
+    const INSTR: u32 = 1;
+
+    /// Build an OrderRequest. `hash_byte` keeps intent_hashes distinct so the
+    /// book's dedup index doesn't reject our resting makers.
+    fn req(
+        side: Side,
+        price: u64,
+        qty: u64,
+        tif: TimeInForce,
+        request_type: RequestType,
+        hash_byte: u8,
+    ) -> OrderRequest {
+        let mut h = [0u8; 32];
+        h[0] = hash_byte;
+        OrderRequest {
+            price,
+            quantity: qty,
+            origin_ts: 1_000,
+            instrument_id: INSTR,
+            side,
+            order_type: OrderType::Limit,
+            tif,
+            request_type,
+            intent_hash: IntentHash(h),
+        }
+    }
+
+    fn engine_with_book() -> Engine {
+        let mut e = Engine::new();
+        e.add_instrument(INSTR, 64).unwrap();
+        e
+    }
+
+    /// Rest a GTC maker on the book and assert it actually rested.
+    fn rest_maker(e: &mut Engine, side: Side, price: u64, qty: u64, hash_byte: u8) {
+        let mut out = Vec::new();
+        e.process(&req(side, price, qty, TimeInForce::GTC, RequestType::New, hash_byte), &mut out);
+        assert!(matches!(out.as_slice(), [OrderEvent::New(_)]), "maker should rest, got {out:?}");
+    }
+
+    /// Process one request and return only the events it produced.
+    fn run(e: &mut Engine, r: &OrderRequest) -> Vec<OrderEvent> {
+        let mut out = Vec::new();
+        e.process(r, &mut out);
+        out
+    }
+
+    // --- assertion helpers -------------------------------------------------
+
+    /// Number of fill events (taker + maker, Fill or PartialFill).
+    fn fill_count(ev: &[OrderEvent]) -> usize {
+        ev.iter()
+            .filter(|e| matches!(e, OrderEvent::Fill { .. } | OrderEvent::PartialFill { .. }))
+            .count()
+    }
+
+    /// (reason, remaining_qty) of the single Reject, if any.
+    fn reject(ev: &[OrderEvent]) -> Option<(RejectReason, u64)> {
+        ev.iter().find_map(|e| match e {
+            OrderEvent::Reject { reason, remaining_qty, .. } => Some((*reason, *remaining_qty)),
+            _ => None,
+        })
+    }
+
+    fn new_event(ev: &[OrderEvent]) -> Option<Order> {
+        ev.iter().find_map(|e| match e {
+            OrderEvent::New(o) => Some(*o),
+            _ => None,
+        })
+    }
+
+    // --- GTC ---------------------------------------------------------------
+
+    #[test]
+    fn gtc_with_no_cross_rests_whole_order() {
+        let mut e = engine_with_book();
+        let out = run(&mut e, &req(Side::Bid, 100, 10, TimeInForce::GTC, RequestType::New, 1));
+
+        assert_eq!(fill_count(&out), 0);
+        assert!(reject(&out).is_none());
+        let rested = new_event(&out).expect("should emit New");
+        assert_eq!((rested.price, rested.quantity), (100, 10));
+
+        let (price, level) = e.book(INSTR).unwrap().best_bid().unwrap();
+        assert_eq!((price, level.total_qty()), (100, 10));
+    }
+
+    #[test]
+    fn gtc_partial_cross_rests_remainder() {
+        let mut e = engine_with_book();
+        rest_maker(&mut e, Side::Ask, 100, 4, 1);
+
+        let out = run(&mut e, &req(Side::Bid, 100, 10, TimeInForce::GTC, RequestType::New, 2));
+
+        // 4 crossed (one taker + one maker event); remainder 6 rests.
+        assert_eq!(fill_count(&out), 2);
+        assert!(reject(&out).is_none());
+        assert_eq!(new_event(&out).unwrap().quantity, 6);
+
+        let book = e.book(INSTR).unwrap();
+        assert!(book.best_ask().is_none(), "ask fully consumed");
+        assert_eq!(book.best_bid().unwrap().1.total_qty(), 6, "remainder rests as bid");
+    }
+
+    // --- IOC ---------------------------------------------------------------
+
+    #[test]
+    fn ioc_partial_fill_rejects_only_unfilled_remainder() {
+        // Guards the bug where IOC reported req.quantity instead of `remaining`.
+        let mut e = engine_with_book();
+        rest_maker(&mut e, Side::Ask, 100, 4, 1);
+
+        let out = run(&mut e, &req(Side::Bid, 100, 10, TimeInForce::IOC, RequestType::New, 2));
+
+        assert_eq!(fill_count(&out), 2, "4 units crossed");
+        assert_eq!(
+            reject(&out),
+            Some((RejectReason::InsufficientLiquidity, 6)),
+            "reject must report the 6 unfilled units, not the original 10"
+        );
+        assert!(e.book(INSTR).unwrap().best_bid().is_none(), "IOC never rests");
+    }
+
+    #[test]
+    fn ioc_with_no_liquidity_rejects_full_quantity_no_fills() {
+        let mut e = engine_with_book();
+        let out = run(&mut e, &req(Side::Bid, 100, 10, TimeInForce::IOC, RequestType::New, 1));
+
+        assert_eq!(fill_count(&out), 0);
+        assert_eq!(reject(&out), Some((RejectReason::InsufficientLiquidity, 10)));
+        assert!(e.book(INSTR).unwrap().best_bid().is_none());
+    }
+
+    // --- FOK ---------------------------------------------------------------
+
+    #[test]
+    fn fok_insufficient_liquidity_rejects_with_zero_fills() {
+        // Guards the missing-`return` bug: without it, FOK would emit partial
+        // fills and then hit `debug_assert!(false)` -> panic in this test.
+        let mut e = engine_with_book();
+        rest_maker(&mut e, Side::Ask, 100, 4, 1); // only 4 available, need 10
+
+        let out = run(&mut e, &req(Side::Bid, 100, 10, TimeInForce::FOK, RequestType::New, 2));
+
+        assert_eq!(fill_count(&out), 0, "FOK is all-or-nothing: no partial fills");
+        assert_eq!(reject(&out), Some((RejectReason::InsufficientLiquidity, 10)));
+        assert_eq!(
+            e.book(INSTR).unwrap().best_ask().unwrap().1.total_qty(),
+            4,
+            "resting maker must be untouched"
+        );
+    }
+
+    #[test]
+    fn fok_sufficient_liquidity_fills_completely() {
+        let mut e = engine_with_book();
+        rest_maker(&mut e, Side::Ask, 100, 12, 1); // more than enough
+
+        let out = run(&mut e, &req(Side::Bid, 100, 10, TimeInForce::FOK, RequestType::New, 2));
+
+        assert_eq!(fill_count(&out), 2, "taker fully filled + maker partially");
+        assert!(reject(&out).is_none());
+        assert_eq!(
+            e.book(INSTR).unwrap().best_ask().unwrap().1.total_qty(),
+            2,
+            "12 resting - 10 consumed = 2 remain"
+        );
+    }
+
+    #[test]
+    fn fok_pre_check_respects_price_limit() {
+        // Liquidity exists, but only above the taker's limit -> FOK must reject.
+        let mut e = engine_with_book();
+        rest_maker(&mut e, Side::Ask, 110, 50, 1);
+
+        let out = run(&mut e, &req(Side::Bid, 100, 10, TimeInForce::FOK, RequestType::New, 2));
+
+        assert_eq!(fill_count(&out), 0);
+        assert_eq!(reject(&out), Some((RejectReason::InsufficientLiquidity, 10)));
+        assert_eq!(e.book(INSTR).unwrap().best_ask().unwrap().1.total_qty(), 50);
+    }
+
+    // --- price-time priority ----------------------------------------------
+
+    #[test]
+    fn trade_executes_at_resting_maker_price() {
+        // Aggressive taker crosses; the trade prints at the maker's resting
+        // price (price improvement for the taker), not the taker's limit.
+        let mut e = engine_with_book();
+        rest_maker(&mut e, Side::Ask, 100, 10, 1);
+
+        let out = run(&mut e, &req(Side::Bid, 105, 10, TimeInForce::GTC, RequestType::New, 2));
+
+        assert_eq!(fill_count(&out), 2);
+        for ev in &out {
+            match ev {
+                OrderEvent::Fill { fill_price, .. }
+                | OrderEvent::PartialFill { fill_price, .. } => assert_eq!(*fill_price, 100),
+                _ => {}
+            }
+        }
+    }
 }

@@ -417,7 +417,7 @@ mod tests {
             origin_ts: 0,
             instrument_id: 0,
             side: Side::Ask,
-            order_type: OrderType::Market,
+            order_type: OrderType::Limit,
             tif: TimeInForce::IOC,
             _padding: 0,
             intent_hash: IntentHash::zeroed()

@@ -168,7 +168,7 @@ mod tests {
             origin_ts: 999_999_999,
             instrument_id: 42,
             side: Side::Ask,
-            order_type: OrderType::Market,
+            order_type: OrderType::Limit,
             tif: TimeInForce::IOC,
             _padding: 0,
             intent_hash: IntentHash::zeroed(),

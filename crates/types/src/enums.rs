@@ -7,11 +7,13 @@ pub enum Side {
     Ask = 1
 }
 
+//OrderType, is limit only - aggressive/market-style orders are expressed
+// as a marketable limit price + IOC at the gateway
+// although leaving it as enum for forward compatibility
 #[repr(u8)]
 #[derive(NoUninit, CheckedBitPattern, Copy, Clone, PartialEq, Eq, Debug)]
 pub enum  OrderType {
     Limit = 0,
-    Market = 1
 }
 
 #[repr(u8)]

@@ -8,29 +8,36 @@
 //! and the taker pays/receives that price (price improvement for the taker
 //! for aggressive crosses).
 //!
-//! The per-order cross loop is shared between limit and market orders via the
-//! private `cross_loop` function. `match_limit` and `match_market` differ only
-//! in two ways: the cross-condition check (limit gates by price; market always
-//! crosses) and the residual handling (limit rests; market rejects).
+//! The matcher is limit-only. Every order carries a price and a
+//! [`TimeInForce`] ({GTC, IOC, FOK}); aggressive/market-style fills are
+//! expressed upstream as a marketable limit price + IOC at the gateway, not as
+//! a separate order type. [`match_limit`] drives the shared `cross_loop` and
+//! then applies TIF-specific residual handling: GTC rests the remainder, IOC
+//! rejects it, and FOK is gated up front so it either fully fills or never
+//! touches the book.
 //!
 use orderbook::{InsertError, OrderBook};
-use types::{Order, OrderEvent, OrderId, OrderRequest, RejectReason, Side};
+use types::{Order, OrderEvent, OrderId, OrderRequest, RejectReason, Side, TimeInForce};
 use crate::events::push_reject;
 
-/// match a limit order against the opposite side, then rest any residual.
+/// Match a limit order against the opposite side, then apply its time-in-force residual policy.
 ///
 /// # Algorithm - per-order cross loop
 ///
 /// 1. peek the opposing top.
 /// 2. If it crosses the taker's price. fill `min(remaining, maker.qty)`
-///     at the maker's price.
+///    at the maker's price.
 /// 3. Emit the fill event for each side (`Fill` if that side is fully
-///     consumed or `PartialFill` otherwise.
+///    consumed or `PartialFill` otherwise.
 /// 4. `pop_top` if the maker is fully consumed, else `reduce_top`
 /// 5. Repeat from 1. until the taker is fully exhausted or no more orders
-///     to cross.
-/// 6. Residual quantity rests on the order book. emit `New`
-///    (Insert failures surface as a Reject for the unfilled portion.)
+///    to cross.
+/// 6. Apply the time-in-force residual policy to any unfilled quantity:
+///    - GTC: rest on the book, emit `New` (insert failures surface as a
+///      Reject for the unfilled portion).
+///    - IOC: reject the unfilled remainder with `InsufficientLiquidity`.
+///    - FOK: gated before step 1 — full fill is pre-verified, so no residual
+///      can survive (reject up front if the book can't fully fill).
 ///
 /// # Complexity
 /// O(N Log L) where N = resting order's consumed, L = price levels on the
@@ -40,100 +47,111 @@ use crate::events::push_reject;
 ///
 /// # known follow-up(improvement)
 /// 1. if the remaining >= level.total_quantity, the whole level can be consumed at once
-///     reducing complexity to O(L Log L), try after benchmarks
+///    reducing complexity to O(L Log L), try after benchmarks
 /// 2. pushing to out vector is not ideal from performance point of view, there are two
-///     possible alternatives.
-///     - direct use the seqlock ipc here, but increase coupling with different crate.
-///     - use an event sink, can caller can choose where it lands.
+///    possible alternatives.
+///    - direct use the seqlock ipc here, but increase coupling with different crate.
+///    - use an event sink, can caller can choose where it lands.
 ///
 pub(crate) fn match_limit(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out: &mut Vec<OrderEvent>) {
-    // TODO(TIF): apply TimeInForce semantics around the cross loop.
-    //   - GTC (current behavior): residual rests on the book.
-    //   - IOC: drop the residual (do not insert); emit no New event.
-    //   - FOK: atomicity gate — verify req.quantity is fully fillable against
-    //     the opposing side BEFORE entering cross_loop. If not, reject the
-    //     whole request with InsufficientLiquidity (zero fills emitted).
-    //   - GTD: same as GTC for v1; expiry mechanism is deferred.
-    let remaining = cross_loop(book, req, order_id, Some(req.price), out);
+    // FOK (Fill-or-Kill) is all-or-nothing: prove the full quantity is fillable
+    // BEFORE we touch the book, so a failure emits zero fills instead of
+    // partials we'd have to unwind. Nothing has filled yet, so the rejected
+    // remainder is the whole req.quantity.
+    if req.tif == TimeInForce::FOK && !has_sufficient_liquidity(book, req) {
+        push_reject(RejectReason::InsufficientLiquidity, req.quantity, req, out);
+        return;
+    }
 
-    // Residual: GTC rests on the book. Insert failures surface as a Reject
-    // for the unfilled portion — fills already emitted in cross_loop are real
-    // trades on the book and are not rolled back.
-    if remaining > 0 {
-        let resting = Order {
-            order_id: OrderId(order_id),
-            price: req.price,
-            quantity: remaining,
-            origin_ts: req.origin_ts,
-            instrument_id: req.instrument_id,
-            side: req.side,
-            order_type: req.order_type,
-            tif: req.tif,
-            _padding: 0,
-            intent_hash: req.intent_hash,
-        };
-        match book.insert(resting) {
-            Ok(_) => out.push(OrderEvent::New(resting)),
-            Err(InsertError::ArenaFull) => {
-                push_reject(RejectReason::SystemAtCapacity, remaining, req, out);
-            }
-            Err(InsertError::DuplicateIntent) => {
-                push_reject(RejectReason::DuplicateIntent, remaining, req, out);
+    let remaining = cross_loop(book, req, order_id, out);
+    if remaining == 0 {
+        return;
+    }
+
+    match req.tif {
+        // pre-check done, everything should have been consumed
+        TimeInForce::FOK => {
+            debug_assert!(false, "FOK left a residual, must never happen, pre-check must have prevented this")
+        }
+        // take what crossed and reject the unfilled remainder, never rest
+        TimeInForce::IOC => {
+            push_reject(RejectReason::InsufficientLiquidity, remaining, req, out);
+        }
+        // rest the unfilled portion, Insert failure rejects only thar portion,
+        // fills already done are real trades we don't roll back
+        TimeInForce::GTC => {
+            let resting = Order {
+                order_id: OrderId(order_id),
+                price: req.price,
+                quantity: remaining,
+                origin_ts: req.origin_ts,
+                instrument_id: req.instrument_id,
+                side: req.side,
+                order_type: req.order_type,
+                tif: req.tif,
+                _padding: 0,
+                intent_hash: req.intent_hash,
+            };
+            match book.insert(resting) {
+                Ok(_) => out.push(OrderEvent::New(resting)),
+                Err(InsertError::ArenaFull) => {
+                    push_reject(RejectReason::SystemAtCapacity, remaining, req, out);
+                }
+                Err(InsertError::DuplicateIntent) => {
+                    push_reject(RejectReason::DuplicateIntent, remaining, req, out);
+                }
             }
         }
     }
 }
 
-/// match a market order against the opposing side until exhausted or no liquidity remains
-///
-/// # Algorithm — per-order cross loop
-///
-/// Identical to `match_limit` except:
-///   - No cross-condition check (market crosses any price).
-///   - No residual resting: if quantity remains after the opposing side
-///     is empty, emit `Reject{InsufficientLiquidity}`.
-///
-/// 1. Peek the opposing top. If `None` → break.
-/// 2. Fill `min(remaining, maker.qty)` at the maker's price.
-/// 3. Emit Fill/PartialFill for each side per the same rule as `match_limit`.
-/// 4. `pop_top` if maker fully consumed, else `reduce_top`.
-/// 5. Repeat until taker exhausted or opposing side empty.
-/// 6. If residual remains → emit `Reject{InsufficientLiquidity}`.
-///
-/// # Complexity
-///
-/// Same as `match_limit`: O(N log L) where N = resting orders consumed,
-/// L = levels on opposing side.
-///
-pub(crate) fn match_market(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out: &mut Vec<OrderEvent>) {
-    let remaining = cross_loop(book, req, order_id, None, out);
-
-    // Market orders don't rest; unfilled qty is rejected.
-    if remaining > 0 {
-        push_reject(RejectReason::InsufficientLiquidity, remaining, req, out);
+fn has_sufficient_liquidity(book: &OrderBook, req: &OrderRequest) -> bool {
+    match req.side {
+        Side::Bid => {
+            liquidity_reaches(book.ask_depth(usize::MAX), Side::Bid, req.price, req.quantity)
+        }
+        Side::Ask => {
+            liquidity_reaches(book.bid_depth(usize::MAX), Side::Ask, req.price, req.quantity)
+        }
     }
+
 }
 
-/// Shared per-order cross loop, used by both `match_limit` and `match_market`.
+#[inline]
+fn liquidity_reaches(
+    levels: impl Iterator<Item=(u64, u64)>,
+    taker_side: Side,
+    taker_price: u64,
+    required: u64
+) -> bool{
+    let mut acc: u64 = 0;
+    for (price, qty) in levels {
+        if !crossing(taker_side, taker_price, price) {
+            break
+        }
+        acc += qty;
+        if acc >= required {
+            return true
+        }
+    };
+    false
+}
+
+/// Shared per-order cross loop driven by [`match_limit`].
 ///
 /// Walks the opposing side of the book one resting order at a time, filling
 /// `min(remaining, maker.qty)` at the maker's price. Emits one fill event
 /// per party per trade (taker + maker) and mutates the book (`pop_top` for
 /// full consumption, `reduce_top` for partial). Continues until the taker
-/// is exhausted, the opposing side is empty, or the cross condition fails.
+/// is exhausted, the opposing side is empty, or `req.price` no longer crosses
+/// the opposing top.
 ///
-/// `limit_price`:
-///   - `Some(p)`: limit caller; loop stops when the opposing top no longer
-///     satisfies `crossing(req.side, p, maker_price)`.
-///   - `None`: market caller; loop ignores price and crosses whatever exists.
-///
-/// Returns the unfilled remaining quantity. Callers handle the residual
-/// per their own policy (rest for limit GTC, reject for market).
+/// Returns the unfilled remaining quantity. The caller applies the
+/// time-in-force residual policy (GTC rests, IOC rejects the remainder).
 fn cross_loop(
     book: &mut OrderBook,
     req: &OrderRequest,
     order_id: u64,
-    limit_price: Option<u64>,
     out: &mut Vec<OrderEvent>,
 ) -> u64 {
     let opposite = opposite(req.side);
@@ -142,9 +160,7 @@ fn cross_loop(
     while remaining > 0 {
         let (maker_price, maker_qty, maker_id, maker_intent) = {
             let Some(top) = book.peek_top(opposite) else { break };
-            if let Some(taker_price) = limit_price {
-                if !crossing(req.side, taker_price, top.price) { break }
-            }
+            if !crossing(req.side, req.price, top.price) { break }
             (top.price, top.order.quantity, top.order.order_id.0, top.order.intent_hash)
         };
 
