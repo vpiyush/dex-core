@@ -1,4 +1,3 @@
-
 //! implements price time matching algorithm against an [`orderbook`]:
 //! incoming taker order cross the opposite matching side until the taker is
 //! exhausted or the opposite side is empty, OR no more resting orders satisfy the
@@ -9,9 +8,14 @@
 //! and the taker pays/receives that price (price improvement for the taker
 //! for aggressive crosses).
 //!
+//! The per-order cross loop is shared between limit and market orders via the
+//! private `cross_loop` function. `match_limit` and `match_market` differ only
+//! in two ways: the cross-condition check (limit gates by price; market always
+//! crosses) and the residual handling (limit rests; market rejects).
 //!
-use orderbook::{OrderBook};
-use types::{Order, OrderEvent, OrderId, OrderRequest, Side};
+use orderbook::{InsertError, OrderBook};
+use types::{Order, OrderEvent, OrderId, OrderRequest, RejectReason, Side};
+use crate::events::push_reject;
 
 /// match a limit order against the opposite side, then rest any residual.
 ///
@@ -26,6 +30,7 @@ use types::{Order, OrderEvent, OrderId, OrderRequest, Side};
 /// 5. Repeat from 1. until the taker is fully exhausted or no more orders
 ///     to cross.
 /// 6. Residual quantity rests on the order book. emit `New`
+///    (Insert failures surface as a Reject for the unfilled portion.)
 ///
 /// # Complexity
 /// O(N Log L) where N = resting order's consumed, L = price levels on the
@@ -41,73 +46,21 @@ use types::{Order, OrderEvent, OrderId, OrderRequest, Side};
 ///     - direct use the seqlock ipc here, but increase coupling with different crate.
 ///     - use an event sink, can caller can choose where it lands.
 ///
-pub fn match_limit(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out: &mut Vec<OrderEvent>) {
-    let opposite = opposite(req.side);
-    let mut remaining = req.quantity;
-    while remaining > 0 {
-        let (maker_price, maker_qty, maker_id, maker_intent)  = {
-            // opposite side is empty
-            let Some(top) = book.peek_top(opposite) else {
-                break
-            };
-            // no crossing
-            if !crossing(req.side, req.price, top.price) {
-                break
-            }
-            // side is consumable
-            (top.price, top.order.quantity, top.order.order_id.0, top.order.intent_hash)
-        };
+pub(crate) fn match_limit(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out: &mut Vec<OrderEvent>) {
+    // TODO(TIF): apply TimeInForce semantics around the cross loop.
+    //   - GTC (current behavior): residual rests on the book.
+    //   - IOC: drop the residual (do not insert); emit no New event.
+    //   - FOK: atomicity gate — verify req.quantity is fully fillable against
+    //     the opposing side BEFORE entering cross_loop. If not, reject the
+    //     whole request with InsufficientLiquidity (zero fills emitted).
+    //   - GTD: same as GTC for v1; expiry mechanism is deferred.
+    let remaining = cross_loop(book, req, order_id, Some(req.price), out);
 
-        let fill_qty = remaining.min(maker_qty);
-        let fill_price = maker_price;
-        let maker_remaining = maker_qty - fill_qty;
-        remaining -= fill_qty;
-
-        // emit the fill events
-        if remaining == 0 {
-            out.push( OrderEvent::Fill {
-                id: order_id,
-                fill_qty,
-                fill_price,
-                origin_ts: req.origin_ts,
-                intent_hash: req.intent_hash,
-            })
-        } else {
-            out.push( OrderEvent::PartialFill {
-                id: order_id,
-                fill_qty,
-                fill_price,
-                remaining_qty: remaining,
-                origin_ts: req.origin_ts,
-                intent_hash: req.intent_hash,
-            })
-        }
-        // emit maker_fill events also mutate book
-        if maker_remaining == 0 {
-            out.push(OrderEvent::Fill {
-                id: maker_id,
-                fill_qty,
-                fill_price,
-                origin_ts: req.origin_ts, // using the request ts since it caused the event to be fired
-                intent_hash: maker_intent,
-            });
-            book.pop_top(opposite);
-        } else {
-            out.push(OrderEvent::PartialFill {
-                id: maker_id,
-                fill_qty,
-                fill_price,
-                remaining_qty: maker_remaining,
-                origin_ts: req.origin_ts,
-                intent_hash: maker_intent,
-            });
-            book.reduce_top(opposite, fill_qty);
-        }
-    }
-
-    // check if there is still residual
+    // Residual: GTC rests on the book. Insert failures surface as a Reject
+    // for the unfilled portion — fills already emitted in cross_loop are real
+    // trades on the book and are not rolled back.
     if remaining > 0 {
-        let resting = Order{
+        let resting = Order {
             order_id: OrderId(order_id),
             price: req.price,
             quantity: remaining,
@@ -119,8 +72,15 @@ pub fn match_limit(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out:
             _padding: 0,
             intent_hash: req.intent_hash,
         };
-        book.insert(resting).expect("insert error handling deferred");
-        out.push(OrderEvent::New(resting));
+        match book.insert(resting) {
+            Ok(_) => out.push(OrderEvent::New(resting)),
+            Err(InsertError::ArenaFull) => {
+                push_reject(RejectReason::SystemAtCapacity, remaining, req, out);
+            }
+            Err(InsertError::DuplicateIntent) => {
+                push_reject(RejectReason::DuplicateIntent, remaining, req, out);
+            }
+        }
     }
 }
 
@@ -145,14 +105,46 @@ pub fn match_limit(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out:
 /// Same as `match_limit`: O(N log L) where N = resting orders consumed,
 /// L = levels on opposing side.
 ///
-pub fn match_market(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out: &mut Vec<OrderEvent>) {
+pub(crate) fn match_market(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out: &mut Vec<OrderEvent>) {
+    let remaining = cross_loop(book, req, order_id, None, out);
+
+    // Market orders don't rest; unfilled qty is rejected.
+    if remaining > 0 {
+        push_reject(RejectReason::InsufficientLiquidity, remaining, req, out);
+    }
+}
+
+/// Shared per-order cross loop, used by both `match_limit` and `match_market`.
+///
+/// Walks the opposing side of the book one resting order at a time, filling
+/// `min(remaining, maker.qty)` at the maker's price. Emits one fill event
+/// per party per trade (taker + maker) and mutates the book (`pop_top` for
+/// full consumption, `reduce_top` for partial). Continues until the taker
+/// is exhausted, the opposing side is empty, or the cross condition fails.
+///
+/// `limit_price`:
+///   - `Some(p)`: limit caller; loop stops when the opposing top no longer
+///     satisfies `crossing(req.side, p, maker_price)`.
+///   - `None`: market caller; loop ignores price and crosses whatever exists.
+///
+/// Returns the unfilled remaining quantity. Callers handle the residual
+/// per their own policy (rest for limit GTC, reject for market).
+fn cross_loop(
+    book: &mut OrderBook,
+    req: &OrderRequest,
+    order_id: u64,
+    limit_price: Option<u64>,
+    out: &mut Vec<OrderEvent>,
+) -> u64 {
     let opposite = opposite(req.side);
     let mut remaining = req.quantity;
 
     while remaining > 0 {
         let (maker_price, maker_qty, maker_id, maker_intent) = {
             let Some(top) = book.peek_top(opposite) else { break };
-            // No cross check — market accepts any price.
+            if let Some(taker_price) = limit_price {
+                if !crossing(req.side, taker_price, top.price) { break }
+            }
             (top.price, top.order.quantity, top.order.order_id.0, top.order.intent_hash)
         };
 
@@ -161,7 +153,7 @@ pub fn match_market(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out
         let maker_remaining = maker_qty - fill_qty;
         remaining -= fill_qty;
 
-        // taker fill
+        // Taker fill event
         if remaining == 0 {
             out.push(OrderEvent::Fill {
                 id: order_id,
@@ -181,7 +173,7 @@ pub fn match_market(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out
             });
         }
 
-        // maker fill + book mutation
+        // Maker fill event + book mutation
         if maker_remaining == 0 {
             out.push(OrderEvent::Fill {
                 id: maker_id,
@@ -204,29 +196,19 @@ pub fn match_market(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out
         }
     }
 
-    // residual: market doesn't rest — reject what couldn't fill
-    if remaining > 0 {
-        out.push(OrderEvent::Reject {
-            id: 0,
-            reason: types::RejectReason::InsufficientLiquidity,
-            origin_ts: req.origin_ts,
-            remaining_qty: remaining,
-            intent_hash: req.intent_hash,
-        });
-    }
-
+    remaining
 }
 
-fn opposite(side: Side)-> Side {
+fn opposite(side: Side) -> Side {
     match side {
         Side::Ask => Side::Bid,
-        Side::Bid => Side::Ask
+        Side::Bid => Side::Ask,
     }
 }
 
-fn crossing(taker_side: Side, taker_price: u64, maker_price: u64 ) -> bool{
+fn crossing(taker_side: Side, taker_price: u64, maker_price: u64) -> bool {
     match taker_side {
         Side::Bid => taker_price >= maker_price,
-        Side::Ask => taker_price <= maker_price
+        Side::Ask => taker_price <= maker_price,
     }
 }

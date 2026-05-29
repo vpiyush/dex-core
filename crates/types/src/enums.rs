@@ -42,5 +42,6 @@ pub enum RejectReason {
     UnknownInstrument = 6, // unknown trading pair
     UnknownOrder = 7, // no order with this intent_hash exists
     SystemAtCapacity = 8, // system is overloaded
-    InsufficientLiquidity = 9 // not enough liquidity to fullfill the order
+    InsufficientLiquidity = 9, // not enough liquidity to fullfill the order
+    DuplicateIntent = 10 // intent_hash already exists in the book's index
 }
