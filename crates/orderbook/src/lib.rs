@@ -21,6 +21,9 @@
 
 mod book;
 mod level;
+// Debug-only invariant checker: called under #[cfg(debug_assertions)] in book.rs
+// and exercised by a #[cfg(test)] test. Gated so it isn't dead code in release.
+#[cfg(any(debug_assertions, test))]
 mod invariants;
 
 pub use book::{OrderBook, InsertError, TopView};

@@ -9,6 +9,7 @@
 mod engine;
 mod matching;
 mod events;
+#[cfg(debug_assertions)]
 mod invariants;
 
 pub use engine::*;

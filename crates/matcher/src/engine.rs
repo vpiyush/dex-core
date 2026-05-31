@@ -2,6 +2,7 @@ use rustc_hash::FxHashMap;
 use orderbook::OrderBook;
 use types::{OrderEvent, OrderRequest, RejectReason, RequestType};
 use crate::events::{push_cancel, push_reject};
+#[cfg(debug_assertions)]
 use crate::invariants::assert_invariants;
 use crate::matching::{match_limit};
 

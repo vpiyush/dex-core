@@ -2,3 +2,4 @@ target/
 .claude/
 .idea/
 CLAUDE.md
+bench-runs/

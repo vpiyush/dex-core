@@ -11,3 +11,7 @@ rustc-hash = "2.1.2"
 
 [dev-dependencies]
 telemetry = {path = "../telemetry", features = ["histogram"]}
+
+[[bench]]
+name = "matcher_bench"
+harness = false
