@@ -776,5 +776,16 @@ fn main() {
     let csv_path = format!("{dir}/matcher_{stamp}.csv");
     std::fs::write(&md_path, report).expect("write report");
     std::fs::write(&csv_path, csv).expect("write csv");
-    eprintln!("benchmark run written:\n  {md_path}\n  {csv_path}");
+
+    // Per-scenario HDR percentile distributions for the online plotter
+    // (hdrhistogram.github.io). One file per scenario so any subset can be
+    // overlaid — e.g. cross_n=1 vs cross_n=16, or cancel_hit vs cancel_miss.
+    let hdr_dir = format!("{dir}/matcher_{stamp}_hdr");
+    std::fs::create_dir_all(&hdr_dir).expect("create hdr dir");
+    for h in all {
+        let safe: String = h.label().chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+        std::fs::write(format!("{hdr_dir}/{safe}.hdr"), h.render_hdr_percentiles(5))
+            .expect("write hdr");
+    }
+    eprintln!("benchmark run written:\n  {md_path}\n  {csv_path}\n  {hdr_dir}/*.hdr");
 }

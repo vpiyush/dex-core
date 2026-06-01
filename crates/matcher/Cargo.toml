@@ -8,10 +8,26 @@ types = {path = "../types"}
 arena = {path = "../arena"}
 orderbook = {path = "../orderbook"}
 rustc-hash = "2.1.2"
+# iai-callgrind must be a normal (not dev) optional dep: stable Cargo cannot gate
+# a [[bench]] on an optional dev-dependency via required-features. It is inert
+# unless the `iai` feature is enabled (see docs/benchmarking.md §6).
+iai-callgrind = {version = "0.16.1", optional = true}
+
+[features]
+iai = ["dep:iai-callgrind"]
 
 [dev-dependencies]
 telemetry = {path = "../telemetry", features = ["histogram"]}
+dhat = "0.3"
 
 [[bench]]
 name = "matcher_bench"
 harness = false
+
+[[bench]]
+name = "matcher_iai"
+harness = false
+required-features = ["iai"]
+
+[[example]]
+name = "alloc_proof"

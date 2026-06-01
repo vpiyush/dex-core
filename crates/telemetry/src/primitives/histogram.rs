@@ -83,6 +83,41 @@ impl Histogram {
         self.inner.add(&other.inner).expect("failed to add histogram");
     }
 
+    /// Render the HDR **percentile distribution** in the text format consumed
+    /// by the online plotter at <https://hdrhistogram.github.io/HdrHistogram/>.
+    /// Paste the file there to get the canonical log-percentile latency curve.
+    ///
+    /// Columns: `Value  Percentile  TotalCount  1/(1-Percentile)`. The trailing
+    /// `1/(1-Percentile)` is what gives the plotter its logarithmic x-axis so
+    /// the tail (p99, p99.99, …) is legible rather than crushed against the edge.
+    /// `ticks` = points per halving of the tail distance (5 matches the Java
+    /// reference's default density).
+    pub fn render_hdr_percentiles(&self, ticks: u32) -> String {
+        let mut s = String::new();
+        s.push_str(&format!("# {}\n", self.label));
+        s.push_str("       Value     Percentile TotalCount 1/(1-Percentile)\n\n");
+        let mut running_total: u64 = 0;
+        for v in self.inner.iter_quantiles(ticks) {
+            running_total += v.count_since_last_iteration();
+            let q = v.quantile();
+            let inv = if q < 1.0 { 1.0 / (1.0 - q) } else { f64::INFINITY };
+            s.push_str(&format!(
+                "{:12} {:.12} {:10} {:14.2}\n",
+                v.value_iterated_to(),
+                q,
+                running_total,
+                inv,
+            ));
+        }
+        s.push_str(&format!(
+            "#[Mean    = {:12.2}, Total count  = {:12}]\n",
+            self.inner.mean(),
+            self.inner.len(),
+        ));
+        s.push_str(&format!("#[Max     = {:12}]\n", self.inner.max()));
+        s
+    }
+
     /// CSV header matching [`Self::render_csv`]'s column order.
     pub fn csv_header() -> &'static str {
         "label,count,min_ns,p50_ns,p99_ns,p99_99_ns,max_ns,msgs_per_sec"
@@ -184,6 +219,24 @@ mod tests {
     fn throughput_empty_is_zero() {
         // Guards the divide-by-zero path: an empty histogram has mean 0.
         assert_eq!(Histogram::new("test").throughput_per_sec(), 0.0);
+    }
+
+    #[test]
+    fn hdr_percentiles_well_formed() {
+        let mut h = Histogram::new("hdr");
+        for i in 1..=10_000u64 {
+            h.record(Nanos(i));
+        }
+        let out = h.render_hdr_percentiles(5);
+        // Header line the online plotter keys off of.
+        assert!(out.contains("Value     Percentile TotalCount"));
+        // Last data row's running total must equal total sample count.
+        let last_data = out
+            .lines()
+            .rfind(|l| !l.starts_with('#') && !l.trim().is_empty() && !l.contains("Percentile"))
+            .unwrap();
+        let total: u64 = last_data.split_whitespace().nth(2).unwrap().parse().unwrap();
+        assert_eq!(total, 10_000, "running TotalCount must reach the sample count");
     }
 
     #[test]
