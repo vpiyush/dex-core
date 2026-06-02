@@ -1,0 +1,13 @@
+[package]
+name = "benchkit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+telemetry = { path = "../telemetry", features = ["histogram"] }
+libc = "0.2"                       # getrusage(RUSAGE_THREAD) for OS-noise counters (§2.8)
+dhat = { version = "0.3", optional = true }
+
+[features]
+default = []                       # latency path pulls zero extra deps
+alloc = ["dep:dhat"]               # dhat-backed allocation proof (later slice)

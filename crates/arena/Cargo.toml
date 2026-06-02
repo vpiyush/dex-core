@@ -9,8 +9,8 @@ types = {path = "../types"}
 bytemuck = "1.25.0"
 
 [dev-dependencies]
-criterion = {version = "0.8.2", features = ["html_reports"]}
 telemetry = {path = "../telemetry", features = ["primitives-only", "histogram"]}
+benchkit = {path = "../benchkit"}
 
 [[bench]]
 name = "arena_bench"

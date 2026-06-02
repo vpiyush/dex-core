@@ -1,6 +1,7 @@
-//! Heap-allocation proof for the matcher hot path, via `dhat`.
+//! Heap-allocation proof for the matcher hot path, via `benchkit` + `dhat`.
 //!
 //! Run with: `cargo run --release --example alloc_proof -p matcher`
+//! (or `cargo bench-all --crate matcher --intent alloc`).
 //!
 //! `dhat` installs a global allocator shim that records every allocation, so
 //! this is a SEPARATE binary from the latency bench — the shim perturbs timing
@@ -8,20 +9,21 @@
 //!
 //! What this proves: `Engine::process` does not allocate on the steady-state
 //! matching path *as long as it neither creates nor destroys a price level and
-//! the event buffer does not grow*. We construct exactly that workload —
-//! cancel + re-insert at a single deep, pre-warmed level — and assert the
-//! allocation delta across the measured window is zero.
+//! the event buffer does not grow*. We construct exactly that workload (cancel +
+//! re-insert at a single deep, pre-warmed level) and assert zero allocations.
 //!
-//! Known non-zero-alloc paths (out of scope for this proof, documented in the
-//! orderbook LLD): emptying a level frees its BTreeMap node + VecDeque, and
-//! re-creating it allocates again (there is a `todo: cache the removed level`).
-//! Growing a level's VecDeque past its capacity also allocates. So a workload
-//! that churns levels WILL allocate; that is expected and measured separately
-//! below for honesty.
+//! Known non-zero-alloc paths (out of scope, documented in the orderbook LLD):
+//! emptying a level frees its BTreeMap node + VecDeque; re-creating it allocates
+//! again. So a level-churning workload WILL allocate — measured below (Scenario
+//! B), reported not asserted, for honesty.
+//!
+//! Mechanics (warmup, dhat-tracked delta, the zero-alloc assertion) come from
+//! `benchkit`; this file owns only the domain scenarios and the dhat allocator
+//! the binary must install.
 
-use dhat::HeapStats;
+use benchkit::{assert_zero_alloc, measure_alloc};
 use matcher::Engine;
-use types::{IntentHash, OrderRequest, OrderType, RequestType, Side, TimeInForce};
+use types::{IntentHash, OrderEvent, OrderRequest, OrderType, RequestType, Side, TimeInForce};
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -60,118 +62,74 @@ fn engine() -> Engine {
     e
 }
 
-/// Allocation delta (blocks, bytes) of running `body`, measured via dhat.
-fn alloc_delta(body: impl FnOnce()) -> (u64, u64) {
-    let before = HeapStats::get();
-    body();
-    let after = HeapStats::get();
-    (
-        after.total_blocks - before.total_blocks,
-        after.total_bytes - before.total_bytes,
-    )
+/// Shared scenario state threaded through warmup + measured phases.
+struct St {
+    engine: Engine,
+    buf: Vec<OrderEvent>,
+    seed: u64,
 }
 
+const WARMUP: usize = 1_000;
+const MEASURE: usize = 500_000;
+const PRICE: u64 = 1_000;
+const DEPTH: u64 = 256; // pre-warm the level's VecDeque capacity
+
 fn main() {
-    // Normal (non-testing) profiler: writes dhat-heap.json on drop for the
-    // DHAT viewer at https://nnethercote.github.io/dh_view/dh_view.html
+    // Profiler writes dhat-heap.json on drop (view at dh_view.html).
     let _profiler = dhat::Profiler::builder()
         .file_name("bench-runs/alloc_proof_dhat-heap.json")
         .build();
 
-    const PRICE: u64 = 1_000;
-    const DEPTH: u64 = 256; // level depth to pre-warm the VecDeque capacity
-    const ITERS: u64 = 500_000;
-
-    // ----- Scenario A: zero-alloc steady state -----------------------------
-    // One bid level at PRICE, pre-filled to DEPTH so its VecDeque/HashMap are
-    // warmed. Then cancel the oldest + re-insert a fresh order at the SAME
-    // price, ITERS times. The level never empties (depth stays >= DEPTH-1) and
-    // capacities never grow, so process() should allocate nothing.
-    let (blocks_a, bytes_a) = {
-        let mut e = engine();
-        let mut buf = Vec::with_capacity(64);
-        let mut seed: u64 = 0;
-
-        for _ in 0..DEPTH {
-            buf.clear();
-            e.process(&new_req(Side::Bid, PRICE, 100, seed), &mut buf);
-            seed += 1;
-        }
-        // warm: one cancel+insert cycle so any first-touch growth happens now.
-        for _ in 0..1000 {
-            buf.clear();
-            let cancel_seed = seed - DEPTH; // oldest still-resting order
-            e.process(&cancel_req(cancel_seed), &mut buf);
-            buf.clear();
-            e.process(&new_req(Side::Bid, PRICE, 100, seed), &mut buf);
-            seed += 1;
-        }
-
-        alloc_delta(|| {
-            for _ in 0..ITERS {
-                buf.clear();
-                let cancel_seed = seed - DEPTH;
-                e.process(&cancel_req(cancel_seed), &mut buf);
-                buf.clear();
-                e.process(&new_req(Side::Bid, PRICE, 100, seed), &mut buf);
-                seed += 1;
-            }
-        })
+    // ----- Scenario A: zero-alloc steady state (the hot path) --------------
+    // One bid level pre-filled to DEPTH so its VecDeque/HashMap are warm; then
+    // cancel-oldest + re-insert at the SAME price. The level never empties and
+    // capacities never grow, so process() must allocate nothing.
+    let mut a = St { engine: engine(), buf: Vec::with_capacity(64), seed: 0 };
+    for _ in 0..DEPTH {
+        a.buf.clear();
+        let r = new_req(Side::Bid, PRICE, 100, a.seed);
+        a.engine.process(&r, &mut a.buf);
+        a.seed += 1;
+    }
+    // One cancel+reinsert per step; cancels the oldest still-resting order.
+    let step_a = |st: &mut St| {
+        st.buf.clear();
+        let cancel_seed = st.seed - DEPTH;
+        st.engine.process(&cancel_req(cancel_seed), &mut st.buf);
+        st.buf.clear();
+        st.engine.process(&new_req(Side::Bid, PRICE, 100, st.seed), &mut st.buf);
+        st.seed += 1;
     };
+    let a_delta = assert_zero_alloc("hot path: cancel+reinsert, stable level", &mut a, WARMUP, MEASURE, step_a);
 
     // ----- Scenario B: level-churn (expected to allocate) ------------------
-    // Cross a single resting maker, which EMPTIES its level (freeing the
-    // BTreeMap node + VecDeque), then replenish (re-creating it). This is the
-    // documented alloc-churn path — reported, not asserted, for honesty.
-    let (blocks_b, bytes_b) = {
-        let mut e = engine();
-        let mut buf = Vec::with_capacity(64);
-        let mut seed: u64 = 0;
-        // warm
-        for _ in 0..1000 {
-            buf.clear();
-            e.process(&new_req(Side::Ask, PRICE, 1, seed), &mut buf);
-            seed += 1;
-            buf.clear();
-            let mut taker = new_req(Side::Bid, PRICE, 1, seed);
-            taker.tif = TimeInForce::IOC;
-            e.process(&taker, &mut buf);
-            seed += 1;
-        }
-        alloc_delta(|| {
-            for _ in 0..ITERS {
-                buf.clear();
-                e.process(&new_req(Side::Ask, PRICE, 1, seed), &mut buf);
-                seed += 1;
-                buf.clear();
-                let mut taker = new_req(Side::Bid, PRICE, 1, seed);
-                taker.tif = TimeInForce::IOC;
-                e.process(&taker, &mut buf);
-                seed += 1;
-            }
-        })
+    // Cross a single resting maker, EMPTYING its level (frees BTreeMap node +
+    // VecDeque), then replenish (re-creates it). The documented churn path.
+    let mut b = St { engine: engine(), buf: Vec::with_capacity(64), seed: 0 };
+    let step_b = |st: &mut St| {
+        st.buf.clear();
+        st.engine.process(&new_req(Side::Ask, PRICE, 1, st.seed), &mut st.buf);
+        st.seed += 1;
+        st.buf.clear();
+        let mut taker = new_req(Side::Bid, PRICE, 1, st.seed);
+        taker.tif = TimeInForce::IOC;
+        st.engine.process(&taker, &mut st.buf);
+        st.seed += 1;
     };
+    let b_delta = measure_alloc(&mut b, WARMUP, MEASURE, step_b);
 
     // ----- Report ----------------------------------------------------------
-    let ops_a = ITERS * 2; // cancel + insert per iter
-    let ops_b = ITERS * 2; // insert(ask) + cross(bid) per iter
-    println!("# Matcher allocation proof (dhat)\n");
-    println!("| scenario | ops | alloc blocks | alloc bytes | blocks/op |");
+    println!("# Matcher allocation proof (dhat, via benchkit)\n");
+    println!("| scenario | steps | alloc blocks | alloc bytes | blocks/step |");
     println!("|---|--:|--:|--:|--:|");
     println!(
-        "| A: cancel+reinsert, stable level (HOT PATH) | {ops_a} | {blocks_a} | {bytes_a} | {:.4} |",
-        blocks_a as f64 / ops_a as f64
+        "| A: cancel+reinsert, stable level (HOT PATH) | {MEASURE} | {} | {} | {:.4} |",
+        a_delta.blocks, a_delta.bytes, a_delta.blocks as f64 / MEASURE as f64
     );
     println!(
-        "| B: cross emptying+recreating level (churn)  | {ops_b} | {blocks_b} | {bytes_b} | {:.4} |",
-        blocks_b as f64 / ops_b as f64
+        "| B: cross emptying+recreating level (churn)  | {MEASURE} | {} | {} | {:.4} |",
+        b_delta.blocks, b_delta.bytes, b_delta.blocks as f64 / MEASURE as f64
     );
     println!("\nDHAT detail: bench-runs/alloc_proof_dhat-heap.json (view at dh_view.html)");
-
-    assert_eq!(
-        blocks_a, 0,
-        "HOT PATH REGRESSION: steady-state cancel+reinsert allocated {blocks_a} blocks \
-         ({bytes_a} bytes) — process() must be zero-alloc when no level is created/destroyed"
-    );
-    println!("\n✓ Hot path is zero-allocation (scenario A: 0 blocks across {ops_a} ops).");
+    println!("\n✓ Hot path is zero-allocation (scenario A: 0 blocks across {MEASURE} steps).");
 }

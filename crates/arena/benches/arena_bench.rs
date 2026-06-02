@@ -1,36 +1,89 @@
+//! Arena alloc/remove benchmarks, on the `benchkit` harness.
+//!
+//! Run with: `cargo bench -p arena --bench arena_bench`
+//!
+//! benchkit supplies the warmup/measure `rdtscp` fence, env detection, and
+//! report rendering; this file supplies only the scenarios. Alloc and remove are
+//! measured as SEPARATE scenarios (the old coupled loop's own comment wished for
+//! this) so each gets its own clean percentile distribution.
+//!
+//! Steady-state design: both scenarios keep arena occupancy fixed so neither
+//! drifts toward full/empty during measurement. `alloc` removes the just-alloc'd
+//! slot in the *next* prepare; `remove` re-allocs a slot in prepare so the timed
+//! remove always has something to free.
 
-use criterion::{criterion_group, criterion_main, Criterion};
-use arena::Arena;
-use telemetry::primitives::{calibrate, rdtscp_then_lfence, rdtscp, Histogram, Nanos};
+use benchkit::{Iters, Report, RunEnv, Runner, Sample};
+use std::hint::black_box;
 
-fn bench_alloc_remove(c: &mut Criterion) {
-    let calibration = calibrate();
+use arena::{Arena, ArenaIdx};
 
-    let mut alloc_hist = Histogram::new("Arena alloc");
-    let mut remove_hist = Histogram::new("Arena remove");
+const STD: Iters = Iters::STANDARD;
 
-    let mut arena = Arena::<u64>::new(10_000);
-    c.bench_function("alloc_remove", |b| {
-        b.iter(|| {
-            for _ in 0..1000 {
-                let v = std::hint::black_box(44u64);
-                let t0 = rdtscp_then_lfence();
-                let idx = arena.alloc(v).expect("Arena full");
-                let t1 = rdtscp();
-                std::hint::black_box(idx);
-                // separate histogram for alloc-only would be cleaner; or:
-                alloc_hist.record(t1.since(t0).to_nanos(&calibration));
-                let t2 = rdtscp_then_lfence();
-                let _ =std::hint::black_box( arena.remove(idx));
-                let t3 = rdtscp();
-                remove_hist.record(t3.since(t2).to_nanos(&calibration));
-
+// alloc: time one `alloc`, then free it untimed in the next prepare so occupancy
+// stays flat (capacity never runs out across 1M+ iterations).
+fn alloc(r: &Runner) -> Sample {
+    struct St {
+        arena: Arena<u64>,
+        last: Option<ArenaIdx>,
+    }
+    let mut st = St { arena: Arena::<u64>::new(1_024), last: None };
+    r.bench(
+        "alloc",
+        STD,
+        &mut st,
+        |st, _i| {
+            if let Some(idx) = st.last.take() {
+                st.arena.remove(idx);
             }
-        });
-    });
-    println!("\n{}", alloc_hist.render_markdown());
-    println!("\n{}", remove_hist.render_markdown());
+        },
+        |st, ()| {
+            let idx = st.arena.alloc(black_box(44u64)).expect("arena full");
+            st.last = Some(idx);
+            idx
+        },
+    )
 }
 
-criterion_group!(benches, bench_alloc_remove);
-criterion_main!(benches);
+// remove: re-alloc a slot in prepare (untimed) so the timed `remove` always has
+// a live slot to free; occupancy stays flat.
+fn remove(r: &Runner) -> Sample {
+    struct St {
+        arena: Arena<u64>,
+        pending: Option<ArenaIdx>,
+    }
+    let mut st = St { arena: Arena::<u64>::new(1_024), pending: None };
+    r.bench(
+        "remove",
+        STD,
+        &mut st,
+        |st, _i| {
+            st.pending = Some(st.arena.alloc(44u64).expect("arena full"));
+        },
+        |st, ()| {
+            let idx = st.pending.take().expect("prepare allocated a slot");
+            black_box(st.arena.remove(idx))
+        },
+    )
+}
+
+fn main() -> std::io::Result<()> {
+    let runner = Runner::new();
+    let env = RunEnv::detect(runner.calibration());
+
+    let alloc_s = alloc(&runner);
+    let remove_s = remove(&runner);
+
+    let scope = "single arena op (`alloc` / `remove`) on `Arena<u64>`; \
+                 generational-index slot management, no I/O.";
+    let mut report = Report::new(&env, "Arena benchmark", scope);
+    report.section("Slot management", &[&alloc_s, &remove_s]);
+
+    let paths = report.write_run("bench-runs", "arena")?;
+    eprintln!(
+        "benchmark run written:\n  {}\n  {}\n  {}/*.hdr",
+        paths.markdown.display(),
+        paths.csv.display(),
+        paths.hdr_dir.display()
+    );
+    Ok(())
+}

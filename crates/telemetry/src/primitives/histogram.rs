@@ -20,6 +20,19 @@ impl Histogram {
         self.inner.record(value.as_u64()).expect("Nanos cannot exceed histogram bounds");
     }
 
+    /// Record `value`, back-filling synthetic samples for an expected arrival
+    /// interval — the coordinated-omission correction. If `value` exceeds
+    /// `expected_interval`, hdrhistogram adds the samples that *would* have been
+    /// recorded had ops kept arriving every `expected_interval` ns during the
+    /// stall. Used by the open-loop benchmark runner; for back-to-back recording
+    /// use [`Histogram::record`].
+    #[inline(always)]
+    pub fn record_correct(&mut self, value: Nanos, expected_interval: Nanos) {
+        self.inner
+            .record_correct(value.as_u64(), expected_interval.as_u64())
+            .expect("Nanos cannot exceed histogram bounds");
+    }
+
     pub fn len(&self) -> u64 {
         self.inner.len()
     }
@@ -171,6 +184,30 @@ mod tests {
         // 3-sigfig precision → ~0.1% tolerance
         assert!((h.p50().as_u64() as i64 - 5000).abs() < 10);
         assert!((h.p99().as_u64() as i64 - 9900).abs() < 20);
+    }
+
+    #[test]
+    fn record_correct_backfills_coordinated_omission() {
+        // One op stalls for 100× the expected interval. record_correct must
+        // synthesize the missed in-between samples, so the tail is dragged up
+        // and the count grows beyond the literal number of record calls.
+        let interval = Nanos(10);
+        let mut plain = Histogram::new("plain");
+        let mut corrected = Histogram::new("corrected");
+        for _ in 0..999 {
+            plain.record(interval);
+            corrected.record_correct(interval, interval);
+        }
+        plain.record(Nanos(1_000));
+        corrected.record_correct(Nanos(1_000), interval);
+
+        // Plain: exactly 1000 samples, p99.99 sees the lone spike modestly.
+        assert_eq!(plain.len(), 1_000);
+        // Corrected: the stall back-fills ~99 synthetic samples (1000/10 - 1).
+        assert!(corrected.len() > plain.len(), "CO correction adds samples: {} vs {}", corrected.len(), plain.len());
+        // The corrected p99 is pulled up by the back-filled latencies.
+        assert!(corrected.p99().as_u64() > plain.p99().as_u64(),
+            "corrected p99 {} should exceed plain p99 {}", corrected.p99().as_u64(), plain.p99().as_u64());
     }
 
     #[test]

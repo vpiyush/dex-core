@@ -18,6 +18,7 @@ iai = ["dep:iai-callgrind"]
 
 [dev-dependencies]
 telemetry = {path = "../telemetry", features = ["histogram"]}
+benchkit = {path = "../benchkit", features = ["alloc"]}
 dhat = "0.3"
 
 [[bench]]

@@ -1,0 +1,10 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# No dependencies: the runner shells out to `cargo`/`valgrind`/`perf` via
+# std::process and parses a tiny set of flags by hand. Keeping xtask dep-free
+# means the orchestrator itself never slows a `cargo build`.
+[dependencies]
