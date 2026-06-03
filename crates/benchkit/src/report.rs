@@ -22,6 +22,13 @@ pub struct RunPaths {
     pub markdown: PathBuf,
     pub csv: PathBuf,
     pub hdr_dir: PathBuf,
+    /// A gnuplot script that renders a log-percentile latency overlay of every
+    /// scenario from the `.hdr` files. Run it with `gnuplot <this>` to produce
+    /// the sibling `.svg` (the xtask `plots` intent does this). It is a recipe,
+    /// not an image — benchkit emits no chart itself (no Rust plotting dep).
+    pub gnuplot: PathBuf,
+    /// The SVG the gnuplot script writes to when run (does not exist until then).
+    pub svg: PathBuf,
 }
 
 struct Section<'a> {
@@ -163,19 +170,72 @@ impl<'a> Report<'a> {
         std::fs::write(&md, self.to_markdown())?;
         std::fs::write(&csv, self.to_csv())?;
         std::fs::create_dir_all(&hdr_dir)?;
+        let mut safe_labels = Vec::new();
         for section in &self.sections {
             for sample in &section.samples {
-                let safe: String = sample
-                    .hist
-                    .label()
-                    .chars()
-                    .map(|c| if c.is_alphanumeric() { c } else { '_' })
-                    .collect();
+                let safe = sanitize(sample.hist.label());
                 std::fs::write(hdr_dir.join(format!("{safe}.hdr")), sample.hist.render_hdr_percentiles(5))?;
+                safe_labels.push(safe);
             }
         }
-        Ok(RunPaths { markdown: md, csv, hdr_dir })
+
+        // Emit a gnuplot script (a recipe, not an image): a log-percentile
+        // latency overlay of every scenario, reading the .hdr files written
+        // above. Render with `gnuplot <script>` → the sibling .svg.
+        let gnuplot = PathBuf::from(format!("{dir}/{name}_{stamp}.gnuplot"));
+        let svg = PathBuf::from(format!("{dir}/{name}_{stamp}.svg"));
+        let hdr_dirname = format!("{name}_{stamp}_hdr");
+        let svg_name = format!("{name}_{stamp}.svg");
+        std::fs::write(&gnuplot, gnuplot_script(&self.title, &hdr_dirname, &svg_name, &safe_labels))?;
+
+        Ok(RunPaths { markdown: md, csv, hdr_dir, gnuplot, svg })
     }
+}
+
+fn sanitize(label: &str) -> String {
+    label.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect()
+}
+
+/// A self-contained gnuplot script rendering a log-percentile latency curve
+/// (one line per scenario) to SVG. Paths are RELATIVE to the script's own
+/// directory, so it must be run from `bench-runs/` (the xtask `plots` intent
+/// sets cwd accordingly). X = `1/(1-percentile)` on a log scale, so p99 / p99.99
+/// are legible rather than crushed at the right edge — the standard HdrHistogram
+/// plot shape. Column 4 of each `.hdr` is exactly that x value; column 1 is the
+/// latency in ns.
+fn gnuplot_script(title: &str, hdr_dirname: &str, svg_name: &str, labels: &[String]) -> String {
+    let mut s = String::new();
+    s.push_str("# benchkit latency curve — render with: gnuplot <this file> (run from bench-runs/)\n");
+    s.push_str("set terminal svg size 1100,680 font 'sans,11'\n");
+    s.push_str(&format!("set output '{svg_name}'\n"));
+    s.push_str(&format!("set title \"{} — latency by percentile\"\n", gp_escape(title)));
+    s.push_str("set xlabel 'Percentile'\n");
+    s.push_str("set ylabel 'Latency (ns)'\n");
+    s.push_str("set logscale x\n");
+    s.push_str("set grid\n");
+    s.push_str("set key outside right top\n");
+    // Label the log x-axis with familiar percentiles instead of raw 1/(1-p).
+    s.push_str("set xtics ('p50' 2, 'p90' 10, 'p99' 100, 'p99.9' 1000, 'p99.99' 10000, 'p99.999' 100000)\n");
+    // Each .hdr: col1=Value(ns), col4=1/(1-percentile). Skip '#' comment lines.
+    s.push_str("set datafile commentschars '#'\n");
+    s.push_str("plot \\\n");
+    let n = labels.len();
+    for (i, label) in labels.iter().enumerate() {
+        let sep = if i + 1 < n { ", \\" } else { "" };
+        s.push_str(&format!(
+            "  '{hdr_dirname}/{label}.hdr' using 4:1 with lines lw 2 title '{}'{sep}\n",
+            gp_escape(label)
+        ));
+    }
+    if labels.is_empty() {
+        s.push_str("  NaN notitle\n");
+    }
+    s
+}
+
+/// Escape characters that would break a gnuplot double-quoted string / title.
+fn gp_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\'', "")
 }
 
 /// Walk up from the current directory to the workspace root — the nearest

@@ -57,6 +57,19 @@ fn writes_markdown_csv_and_hdr_files() {
     let hdr = std::fs::read_to_string(paths.hdr_dir.join("light.hdr")).unwrap();
     assert!(hdr.contains("Value") && hdr.contains("Percentile"));
 
+    // The gnuplot script exists, targets the right SVG, and references each
+    // scenario's .hdr via the relative hdr dirname (so it runs from bench-runs/).
+    assert!(paths.gnuplot.exists(), "gnuplot script written");
+    let gp = std::fs::read_to_string(&paths.gnuplot).unwrap();
+    let svg_name = paths.svg.file_name().unwrap().to_string_lossy();
+    let hdr_dirname = paths.hdr_dir.file_name().unwrap().to_string_lossy();
+    assert!(gp.contains(&format!("set output '{svg_name}'")), "script outputs the run's SVG");
+    assert!(gp.contains(&format!("{hdr_dirname}/light.hdr")), "script plots each scenario hdr");
+    assert!(gp.contains(&format!("{hdr_dirname}/heavy.hdr")));
+    assert!(gp.contains("using 4:1"), "plots latency (col1) vs 1/(1-percentile) (col4)");
+    // No stray `%` in tic labels (gnuplot treats it as a format char).
+    assert!(!gp.contains('%'), "tic labels must not contain % (gnuplot format char)");
+
     // Cleanup.
     let _ = std::fs::remove_dir_all(&dir);
 }

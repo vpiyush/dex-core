@@ -80,6 +80,9 @@ fn run(args: &[String]) -> Result<(), String> {
     if opts.intents.contains("perfstat") && !tool_present("perf") {
         return Err("perfstat regime requested but `perf` is not on PATH.".into());
     }
+    if opts.intents.contains("plots") && !tool_present("gnuplot") {
+        return Err("plots regime requested but `gnuplot` is not on PATH.".into());
+    }
     if opts.flamegraph && !tool_present("perf") {
         return Err("--flamegraph requested but `perf` is not on PATH.".into());
     }
@@ -101,6 +104,9 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         if opts.intents.contains("perfstat") {
             run_perfstat(krate)?;
+        }
+        if opts.intents.contains("plots") {
+            run_plots(krate)?;
         }
         if opts.flamegraph {
             run_flamegraph(krate)?;
@@ -165,6 +171,32 @@ fn run_perfstat(krate: &str) -> Result<(), String> {
     if !status.success() {
         return Err(format!("[{krate}] perf_bench.sh failed (exit {:?})", status.code()));
     }
+    Ok(())
+}
+
+/// Render the latency-curve SVG by running gnuplot on the most recent
+/// `<crate>_*.gnuplot` script in bench-runs/ (emitted by a latency run). The
+/// script's paths are relative to bench-runs/, so we run gnuplot with that cwd.
+fn run_plots(krate: &str) -> Result<(), String> {
+    let bench_runs = workspace_path("bench-runs");
+    let script = latest_file(&bench_runs, krate, ".gnuplot").ok_or_else(|| {
+        format!(
+            "no {krate}_*.gnuplot found in bench-runs/ — run a latency pass first \
+             (`cargo bench-all --crate {krate}` writes the gnuplot script)."
+        )
+    })?;
+    let script_name = script.file_name().unwrap().to_string_lossy().into_owned();
+    eprintln!("→ [{krate}] plots: gnuplot {script_name}  (cwd bench-runs/)");
+    let status = Command::new("gnuplot")
+        .arg(&script_name)
+        .current_dir(&bench_runs)
+        .status()
+        .map_err(|e| format!("failed to spawn gnuplot: {e}"))?;
+    if !status.success() {
+        return Err(format!("[{krate}] gnuplot failed (exit {:?})", status.code()));
+    }
+    let svg = script_name.replace(".gnuplot", ".svg");
+    eprintln!("  wrote bench-runs/{svg}");
     Ok(())
 }
 
@@ -342,14 +374,14 @@ fn parse(args: &[String]) -> Result<Opts, String> {
                 for part in v.split(',') {
                     let p = part.trim();
                     match p {
-                        "latency" | "cache" | "alloc" | "perfstat" => {
+                        "latency" | "cache" | "alloc" | "perfstat" | "plots" => {
                             intents.insert(p.to_string());
                         }
                         "flamegraph" => flamegraph = true,
                         "" => {}
                         other => {
                             return Err(format!(
-                                "unknown intent `{other}` (latency|cache|alloc|perfstat|flamegraph)"
+                                "unknown intent `{other}` (latency|cache|alloc|perfstat|plots|flamegraph)"
                             ));
                         }
                     }
@@ -369,6 +401,39 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         intents.insert("latency".to_string());
     }
     Ok(Opts { krate, all_crates, intents, flamegraph })
+}
+
+/// Resolve `<workspace-root>/<rel>` by walking up from cwd to the dir whose
+/// Cargo.toml declares `[workspace]`. Falls back to `rel` relative to cwd.
+fn workspace_path(rel: &str) -> std::path::PathBuf {
+    let mut dir = std::env::current_dir().unwrap_or_default();
+    loop {
+        if std::fs::read_to_string(dir.join("Cargo.toml")).is_ok_and(|c| c.contains("[workspace]")) {
+            return dir.join(rel);
+        }
+        if !dir.pop() {
+            return std::path::PathBuf::from(rel);
+        }
+    }
+}
+
+/// Most recently modified file in `dir` whose name starts with `prefix_` and
+/// ends with `suffix`.
+fn latest_file(dir: &Path, prefix: &str, suffix: &str) -> Option<std::path::PathBuf> {
+    let pre = format!("{prefix}_");
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !(name.starts_with(&pre) && name.ends_with(suffix)) {
+            continue;
+        }
+        if let Ok(mtime) = entry.metadata().and_then(|m| m.modified())
+            && best.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true)
+        {
+            best = Some((mtime, entry.path()));
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 fn tool_present(tool: &str) -> bool {
@@ -392,6 +457,7 @@ fn print_help() {
          cache       callgrind instruction/cache counts (needs valgrind; iai crates only)\n  \
          alloc       dhat heap-allocation proof / zero-alloc gate (alloc_proof crates only)\n  \
          perfstat    perf stat: IPC, cache-miss%, branch-mispredict% (needs perf)\n  \
+         plots       render the latency-curve SVG from the latest run (needs gnuplot)\n  \
          flamegraph  build the bench for perf profiling (needs perf + FlameGraph scripts)\n\n\
          CRATES: {}\n\n\
          EXAMPLES:\n  \
