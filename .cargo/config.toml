@@ -1,0 +1,8 @@
+# Workspace cargo aliases.
+#
+# `cargo bench-all …` runs the benchkit xtask orchestrator (see xtask/), which
+# maps a measurement intent to the correct `cargo bench` invocations, verifies a
+# regime can actually run before claiming it did, and auto-spawns the valgrind
+# child for the cache regime. Prefer it over hand-assembling `--features` flags.
+[alias]
+bench-all = "run --release --package xtask --"
