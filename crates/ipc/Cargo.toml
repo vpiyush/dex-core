@@ -1,0 +1,11 @@
+
+[package]
+name = "ipc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytemuck = "1.25.0"
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7.2"

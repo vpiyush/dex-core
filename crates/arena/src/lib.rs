@@ -161,7 +161,7 @@ impl<T> Drop for Arena<T> {
 
 }
 
-// a slot in the arena
+// a slot in the arena, updates generation every times it's reused
 #[repr(C)]
 pub struct Slot<T> {
     generation: u32,
