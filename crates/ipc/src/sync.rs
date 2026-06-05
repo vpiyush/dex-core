@@ -12,6 +12,7 @@ pub(crate) use std::sync::atomic::{fence, AtomicU64, Ordering};
 
 #[cfg(not(loom))]
 #[derive(Debug)]
+#[repr(transparent)]
 pub(crate) struct UnsafeCell<T>(core::cell::UnsafeCell<T>);
 
 #[cfg(not(loom))]
