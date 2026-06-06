@@ -1,10 +1,9 @@
 use std::cell::Cell;
-use crate::sync::Ordering;
+use crate::sync::{Ordering, AtomicU64, fence};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use crate::policy::LapPolicy;
 use crate::slot::Slot;
-use crate::sync::AtomicU64;
 use bytemuck::Pod;
 
 // A `T` - Sized filed forced into its own cache line, so a hot writer
@@ -102,6 +101,39 @@ pub struct Producer<T> {
     // phantom marker to make it !sync, (Cell is Send + !Sync), without this the struct would be send + sync
     // and we do not to threads sharing same Producer, while the ownership transfer is allowed
     _not_sync: PhantomData<Cell<()>>
+}
+
+impl <T> Producer<T> {
+    pub fn publish(&mut self, value: T) -> u64{
+        // producer gets an acces to the queue,
+        // get to the current cursor, picks the slot
+        // before writing increments the version
+        // writes on to the unsafe data pointer
+        // incrments the version again
+        // increments the published again
+        let seq = self.cursor;
+        let slot = &self.queue.slots[(seq as usize) & (self.mask as usize)];
+
+        let v =  2 *(seq>> self.log2_cap);
+        slot.version.store(v+1, Ordering::Relaxed);
+        // the odd version store, would be globally visible, just before the data write.
+        // release fence here ensures that the data write does not leak before the version store
+        // we could use the fetch_add, but we do not need that strong atomicity here, because
+        // there is always one producer here
+        // note: we use stand alone fence, which is not tied to any store, so it acts as
+        // a complete barrier for all kind of `Store` operations, and no store can
+        // be reordered across this
+        fence(Ordering::Release);
+        // exactly one producer exists, so we are the sole writer here, the version
+        // is odd for the whole window.
+        slot.data.with_mut(|ptr|unsafe{ ptr.write(value) });
+        // version updated even. Release publishes this data write to any consumer
+        // that acquire-loads this version and sees v+2
+        slot.version.store(v+2, Ordering::Release);
+        self.cursor = seq + 1;
+        self.queue.published.store(self.cursor, Ordering::Release);
+        seq
+    }
 }
 
 // Independent reader, every reader owns it's cursor and lapPolicy
