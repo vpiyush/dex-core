@@ -77,6 +77,19 @@ impl <T: Pod> Queue<T> {
         self.published.load(Ordering::Acquire)
     }
 
+    // subscribe returns a new consumer for the queue
+    pub fn subscribe(self: &Arc<Self>, policy: LapPolicy) -> Consumer<T>{
+        Consumer {
+            queue: self.clone(),
+            cursor: self.published(),
+            mask: self.mask,
+            log2_cap: self.log2_cap,
+            policy,
+            halted: false,
+            _not_sync: PhantomData,
+        }
+    }
+
 }
 
 
