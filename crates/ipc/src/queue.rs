@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use crate::sync::Ordering;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use crate::policy::LapPolicy;
@@ -32,6 +33,50 @@ pub struct Queue<T> {
     log2_cap: u8,
     // producer committed cursor, mirrored for subscribe. own cache line
     published: CachePadded<AtomicU64>
+}
+
+
+impl <T: Pod> Queue<T> {
+    // queue new exactly one producer is returned with queue
+    fn new(capacity: u32) -> (Arc<Self>, Producer<T>) {
+        #[cfg(not(loom))]
+        const {
+            assert!(
+                core::mem::size_of::<Slot<T>>() <=64,
+                "Slot<T> must be less than 64 bytes, must fit in one cache line"
+            );
+        }
+        assert!(capacity.is_power_of_two(), "capacity should be a power of two");
+        let mut vec = Vec::with_capacity(capacity as usize);
+        for i in 0..capacity {
+            vec.push( Slot::new() )
+        }
+        let slots = vec.into_boxed_slice();
+        let mask = capacity - 1;
+        let log2_cap = capacity.trailing_zeros() as u8;
+        let queue = Arc::new(Self {
+            slots,
+            capacity,
+            mask,
+            log2_cap,
+            published: CachePadded::new(AtomicU64::new(0))
+        });
+        let producer = Producer {
+            queue: Arc::clone(&queue),
+            cursor: 0,
+            mask,
+            log2_cap,
+            _not_sync: PhantomData,
+        };
+        (queue, producer)
+    }
+    pub fn capacity(&self) -> u32 {
+        self.capacity
+    }
+    pub fn published(&self) -> u64 {
+        self.published.load(Ordering::Acquire)
+    }
+
 }
 
 
