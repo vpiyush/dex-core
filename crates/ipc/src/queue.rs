@@ -48,7 +48,7 @@ impl <T: Pod> Queue<T> {
         }
         assert!(capacity.is_power_of_two(), "capacity should be a power of two");
         let mut vec = Vec::with_capacity(capacity as usize);
-        for i in 0..capacity {
+        for _ in 0..capacity {
             vec.push( Slot::new() )
         }
         let slots = vec.into_boxed_slice();
@@ -85,7 +85,7 @@ impl <T: Pod> Queue<T> {
             mask: self.mask,
             log2_cap: self.log2_cap,
             policy,
-            halted: false,
+            halted: None,
             _not_sync: PhantomData,
         }
     }
@@ -105,6 +105,7 @@ pub struct Producer<T> {
 }
 
 impl <T: Pod> Producer<T> {
+    #[inline]
     pub fn publish(&mut self, value: T) -> u64{
         // producer gets an acces to the queue,
         // get to the current cursor, picks the slot
@@ -125,7 +126,7 @@ impl <T: Pod> Producer<T> {
         // a complete barrier for all kind of `Store` operations, and no store can
         // be reordered across this
         fence(Ordering::Release);
-        // exactly one producer exists, so we are the sole writer here, the version
+        // SAFETY: exactly one producer exists, so we are the sole writer here, the version
         // is odd for the whole window.
         slot.data.with_mut(|ptr|unsafe{ ptr.write(value) });
         // version updated even. Release publishes this data write to any consumer
@@ -144,23 +145,31 @@ pub struct Consumer<T> {
     mask: u32,
     log2_cap: u8,
     policy: LapPolicy,
-    halted: bool,
+    halted: Option<u64>,
     _not_sync: PhantomData<Cell<()>>
 }
 
 impl <T :Pod> Consumer<T> {
+    #[inline]
     pub fn poll(&mut self) -> PollResult<T> {
-        if self.halted {
-            todo!("defer policy handling")
+        if let Some(slots_lost) = self.halted {
+            return PollResult::Halted {last_safe_seq: self.cursor, slots_lost };
         }
+
         let seq = self.cursor;
         let slot = &self.queue.slots[(seq as usize) & (self.mask as usize)];
         let expected =  2 * ((seq >> self.log2_cap) + 1);
         // acquire pairs with the producer's V+2 Release commit
         let v1 = slot.version.load(Ordering::Acquire);
-        if v1 != expected {
+        // producer lapped us
+        if v1 > expected {
+            return self.apply_lap_policy()
+        }
+        // not published yet, or producer mid-write
+        if v1 < expected || (v1 & 1) != 0 {
             return PollResult::Empty
         }
+        // SAFETY: reading with const pointer
         let data = slot.data.with(|ptr|unsafe{ ptr.read() });
         fence(Ordering::Acquire);
         let v2  = slot.version.load(Ordering::Relaxed);
@@ -169,6 +178,27 @@ impl <T :Pod> Consumer<T> {
         }
         self.cursor = seq + 1;
         PollResult::Ready(data)
+    }
 
+    fn apply_lap_policy(&mut self) -> PollResult<T> {
+        let live = self.queue.published();
+        let slots_lost = live - self.cursor; // every slot since our cursor last read
+
+        match self.policy {
+            LapPolicy::Halt => {
+                self.halted = Some(slots_lost);
+                PollResult::Halted {last_safe_seq: self.cursor, slots_lost}
+            }
+            LapPolicy::Panic => {
+                panic!("ipc consumer lapped, cursor={}, slots_lost={}", self.cursor, slots_lost);
+            }
+            LapPolicy::SkipToLatest| LapPolicy::SkipAndAlert => {
+                self.cursor = live;
+                PollResult::Skipped { slots_lost, new_seq: live}
+            }
+        }
+    }
+    pub fn is_halted(&self) -> bool {
+        self.halted.is_some()
     }
 }

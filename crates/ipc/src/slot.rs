@@ -1,6 +1,6 @@
 
 use crate::sync::{AtomicU64, UnsafeCell};
-use bytemuck::{Pod, Zeroable};
+use bytemuck::{Pod};
 
 
 // one rung buffer slot, which is seqlock protected cell, isolated on it's
