@@ -1,7 +1,6 @@
 use std::cell::Cell;
-use crate::sync::{Ordering, AtomicU64, fence};
+use crate::sync::{Ordering, AtomicU64, fence, Arc};
 use std::marker::PhantomData;
-use std::sync::Arc;
 use crate::policy::LapPolicy;
 use crate::slot::Slot;
 use bytemuck::Pod;

@@ -1,3 +1,4 @@
+#![cfg(not(loom))]
 use ipc::{LapPolicy, PollResult, Queue};
 
 #[test]

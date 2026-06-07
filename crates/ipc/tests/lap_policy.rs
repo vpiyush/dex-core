@@ -1,4 +1,6 @@
+#![cfg(not(loom))]
 use ipc::{LapPolicy, PollResult, Queue};
+
 
 #[test]
 fn halt_is_sticky() {

@@ -4,9 +4,13 @@
 #[cfg(loom)]
 pub(crate) use loom::cell::UnsafeCell;
 #[cfg(loom)]
+pub(crate) use loom::sync::Arc;
+#[cfg(loom)]
 pub(crate) use loom::sync::atomic::{fence, AtomicU64, Ordering};
 
 
+#[cfg(not(loom))]
+pub(crate) use std::sync::Arc;
 #[cfg(not(loom))]
 pub(crate) use std::sync::atomic::{fence, AtomicU64, Ordering};
 
