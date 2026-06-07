@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::policy::LapPolicy;
 use crate::slot::Slot;
 use bytemuck::Pod;
+use crate::PollResult;
 
 // A `T` - Sized filed forced into its own cache line, so a hot writer
 // can't false share it with read-mostly neighbours
@@ -37,7 +38,7 @@ pub struct Queue<T> {
 
 impl <T: Pod> Queue<T> {
     // queue new exactly one producer is returned with queue
-    fn new(capacity: u32) -> (Arc<Self>, Producer<T>) {
+    pub fn new(capacity: u32) -> (Arc<Self>, Producer<T>) {
         #[cfg(not(loom))]
         const {
             assert!(
@@ -103,7 +104,7 @@ pub struct Producer<T> {
     _not_sync: PhantomData<Cell<()>>
 }
 
-impl <T> Producer<T> {
+impl <T: Pod> Producer<T> {
     pub fn publish(&mut self, value: T) -> u64{
         // producer gets an acces to the queue,
         // get to the current cursor, picks the slot
@@ -145,4 +146,29 @@ pub struct Consumer<T> {
     policy: LapPolicy,
     halted: bool,
     _not_sync: PhantomData<Cell<()>>
+}
+
+impl <T :Pod> Consumer<T> {
+    pub fn poll(&mut self) -> PollResult<T> {
+        if self.halted {
+            todo!("defer policy handling")
+        }
+        let seq = self.cursor;
+        let slot = &self.queue.slots[(seq as usize) & (self.mask as usize)];
+        let expected =  2 * ((seq >> self.log2_cap) + 1);
+        // acquire pairs with the producer's V+2 Release commit
+        let v1 = slot.version.load(Ordering::Acquire);
+        if v1 != expected {
+            return PollResult::Empty
+        }
+        let data = slot.data.with(|ptr|unsafe{ ptr.read() });
+        fence(Ordering::Acquire);
+        let v2  = slot.version.load(Ordering::Relaxed);
+        if v2 != v1 {
+            return PollResult::Empty
+        }
+        self.cursor = seq + 1;
+        PollResult::Ready(data)
+
+    }
 }
