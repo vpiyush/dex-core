@@ -5,7 +5,7 @@ use ipc::{LapPolicy, PollResult, Queue};
 #[test]
 fn halt_is_sticky() {
     let (q, mut prod) = Queue::<u64>::new(4);
-    let mut cons = q.subscribe(LapPolicy::Halt);
+    let mut cons = Queue::subscribe(&q, LapPolicy::Halt);
     for i in 0..6u64 { prod.publish(i); } // 6 > capacity 4 → laps consumer at seq 0
 
     assert_eq!(cons.poll(), PollResult::Halted { last_safe_seq: 0, slots_lost: 6 });
@@ -16,7 +16,7 @@ fn halt_is_sticky() {
 #[test]
 fn skip_to_latest_resyncs_then_resumes() {
     let (q, mut prod) = Queue::<u64>::new(4);
-    let mut cons = q.subscribe(LapPolicy::SkipToLatest);
+    let mut cons = Queue::subscribe(&q, LapPolicy::SkipToLatest);
     for i in 0..6u64 { prod.publish(i); }
 
     assert_eq!(cons.poll(), PollResult::Skipped { slots_lost: 6, new_seq: 6 });
@@ -29,7 +29,7 @@ fn skip_to_latest_resyncs_then_resumes() {
 #[should_panic(expected = "lapped")]
 fn panic_policy_panics() {
     let (q, mut prod) = Queue::<u64>::new(4);
-    let mut cons = q.subscribe(LapPolicy::Panic);
+    let mut cons = Queue::subscribe(&q, LapPolicy::Panic);
     for i in 0..6u64 { prod.publish(i); }
     let _ = cons.poll();
 }
