@@ -162,7 +162,7 @@ impl <T :Pod> Consumer<T> {
         let v1 = slot.version.load(Ordering::Acquire);
         // producer lapped us
         if v1 > expected {
-            return self.apply_lap_policy()
+            return self.apply_lap_policy();
         }
         // not published yet, or producer mid-write
         if v1 < expected || (v1 & 1) != 0 {
@@ -181,19 +181,19 @@ impl <T :Pod> Consumer<T> {
 
     fn apply_lap_policy(&mut self) -> PollResult<T> {
         let live = self.queue.published();
-        let slots_lost = live - self.cursor; // every slot since our cursor last read
+        let slots_lost = live - self.cursor; // everything since our cursor (Skip jumps past it; Halt abandons it)
 
         match self.policy {
             LapPolicy::Halt => {
                 self.halted = Some(slots_lost);
-                PollResult::Halted {last_safe_seq: self.cursor, slots_lost}
+                PollResult::Halted { last_safe_seq: self.cursor, slots_lost }
             }
             LapPolicy::Panic => {
                 panic!("ipc consumer lapped, cursor={}, slots_lost={}", self.cursor, slots_lost);
             }
-            LapPolicy::SkipToLatest| LapPolicy::SkipAndAlert => {
+            LapPolicy::SkipToLatest | LapPolicy::SkipAndAlert => {
                 self.cursor = live;
-                PollResult::Skipped { slots_lost, new_seq: live}
+                PollResult::Skipped { slots_lost, new_seq: live }
             }
         }
     }
