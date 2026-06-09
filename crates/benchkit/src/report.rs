@@ -112,10 +112,16 @@ impl<'a> Report<'a> {
 
     pub fn to_markdown(&self) -> String {
         let mut s = self.env.header(&self.title, &self.scope);
+        if !self.sections.is_empty() {
+            let _ = writeln!(
+                s,
+                "- `inv-cs`/`maj-flt`: involuntary context switches / major page faults during that scenario's measure phase. Nonzero marks a tail spike as OS noise."
+            );
+        }
         for section in &self.sections {
             let _ = writeln!(s, "\n**{}**  _{}_\n", section.title, measured_under(section));
-            let _ = writeln!(s, "| scenario | n | min | p50 | p99 | p99.99 | tail | M/s |");
-            let _ = writeln!(s, "|---|--:|--:|--:|--:|--:|--:|--:|");
+            let _ = writeln!(s, "| scenario | n | min | p50 | p99 | p99.99 | tail | M/s | inv-cs | maj-flt |");
+            let _ = writeln!(s, "|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|");
             for sample in &section.samples {
                 let _ = writeln!(s, "{}", table_row(sample));
             }
@@ -133,12 +139,29 @@ impl<'a> Report<'a> {
 
     /// One CSV row per sample (across all sections), via `Histogram::render_csv`,
     /// with a leading `regime` column so an external consumer can't misattribute.
+    /// The rusage noise counters are APPENDED after the histogram fields so the
+    /// p50/p99 column indices stay stable for existing parsers (`Comparison`,
+    /// xtask's compare mode) and for old CSVs compared against new ones.
     pub fn to_csv(&self) -> String {
         let mut s = String::new();
-        let _ = writeln!(s, "regime,{}", Histogram::csv_header());
+        let _ = writeln!(
+            s,
+            "regime,{},ctx_voluntary,ctx_involuntary,minor_faults,major_faults",
+            Histogram::csv_header()
+        );
         for section in &self.sections {
             for sample in &section.samples {
-                let _ = writeln!(s, "{},{}", regime_tag(sample.arrival_model()), sample.hist.render_csv());
+                let st = &sample.stats;
+                let _ = writeln!(
+                    s,
+                    "{},{},{},{},{},{}",
+                    regime_tag(sample.arrival_model()),
+                    sample.hist.render_csv(),
+                    st.ctx_voluntary,
+                    st.ctx_involuntary,
+                    st.minor_faults,
+                    st.major_faults,
+                );
             }
         }
         s
@@ -308,7 +331,7 @@ fn table_row(sample: &Sample) -> String {
     let p50 = h.p50().as_u64();
     let tail = if p50 > 0 { h.p99_99().as_u64() as f64 / p50 as f64 } else { 0.0 };
     format!(
-        "| {} | {} | {} | {} | {} | {} | {:.0}× | {:.2}M |",
+        "| {} | {} | {} | {} | {} | {} | {:.0}× | {:.2}M | {} | {} |",
         h.label(),
         humanize(h.len()),
         h.min().as_u64(),
@@ -317,6 +340,8 @@ fn table_row(sample: &Sample) -> String {
         h.p99_99().as_u64(),
         tail,
         h.throughput_per_sec() / 1e6,
+        sample.stats.ctx_involuntary,
+        sample.stats.major_faults,
     )
 }
 
@@ -478,6 +503,33 @@ mod tests {
             s.push_str(&format!("{regime},{label},1000,1,{p50},{p50},{p50},{p50},0\n"));
         }
         s
+    }
+
+    #[test]
+    fn noise_counters_render_in_markdown_and_csv() {
+        use crate::stats::{ArrivalModel, RunStats, Sample};
+        use telemetry::primitives::{calibrate, Histogram as TelHistogram, Nanos};
+
+        let env = crate::env::RunEnv::detect(&calibrate());
+        let mut hist = TelHistogram::new("noisy");
+        hist.record(Nanos(100));
+        let sample = Sample {
+            hist,
+            arrival_model: ArrivalModel::BackToBack,
+            stats: RunStats { ctx_involuntary: 7, major_faults: 3, ..Default::default() },
+            overloaded: false,
+        };
+        let mut report = Report::new(&env, "t", "scope");
+        report.section("S", &[&sample]);
+
+        let md = report.to_markdown();
+        assert!(md.contains("| inv-cs | maj-flt |"), "table gains the noise columns");
+        assert!(md.contains("| 7 | 3 |"), "the scenario's own counters render");
+
+        let csv = report.to_csv();
+        let row = csv.lines().nth(1).unwrap();
+        assert_eq!(row.split(',').count(), 13, "regime + 8 hist fields + 4 rusage");
+        assert!(row.ends_with(",0,7,0,3"), "rusage appended in vol,invol,minor,major order");
     }
 
     #[test]
