@@ -286,39 +286,64 @@ fn run_compare(rest: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Minimal CSV comparison mirroring `benchkit::Comparison`. Schema:
-/// `regime,label,count,min_ns,p50_ns,p99_ns,p99_99_ns,max_ns,msgs_per_sec`.
+/// Minimal CSV comparison mirroring `benchkit::Comparison`: the verdict is the
+/// WORST metric across p50/p99/p99.99, so a flat p50 cannot mask a blown tail.
+/// Schema (newer benchkit appends rusage columns; they are ignored here):
+/// `regime,label,count,min_ns,p50_ns,p99_ns,p99_99_ns,max_ns,msgs_per_sec,…`.
 fn compare_csvs(base_path: &str, cur_path: &str, noise_pct: f64) -> Result<String, String> {
-    let base = parse_p50s(base_path)?;
-    let cur = parse_p50s(cur_path)?;
+    const NAMES: [&str; 3] = ["p50", "p99", "p99.99"];
+    let base = parse_percentiles(base_path)?;
+    let cur = parse_percentiles(cur_path)?;
 
     use std::fmt::Write as _;
     let mut out = String::new();
     let _ = writeln!(out, "# Benchmark comparison (noise band ±{noise_pct:.1}%)\n");
-    let _ = writeln!(out, "| scenario | regime | base p50 | cur p50 | Δ% | verdict |");
+    let _ = writeln!(out, "Each cell is `base→current (Δ%)` in ns. The verdict is the worst metric of the three.\n");
+    let _ = writeln!(out, "| scenario | regime | p50 | p99 | p99.99 | verdict |");
     let _ = writeln!(out, "|---|---|--:|--:|--:|---|");
 
     let keys: BTreeSet<&(String, String)> = base.keys().chain(cur.keys()).collect();
     for key in keys {
         let (label, regime) = key;
         match (base.get(key), cur.get(key)) {
-            (Some(&b), Some(&c)) => {
-                let delta = (c as f64 - b as f64) / b as f64 * 100.0;
-                let verdict = if delta.abs() <= noise_pct {
-                    "· within noise"
-                } else if delta < 0.0 {
-                    "✓ improved"
-                } else {
-                    "✗ REGRESSED"
+            (Some(b), Some(c)) if b.iter().all(|&v| v > 0) => {
+                let mut cells = Vec::new();
+                let mut worst_regression: Option<(usize, f64)> = None;
+                let mut best_improvement: Option<(usize, f64)> = None;
+                for i in 0..3 {
+                    let delta = (c[i] as f64 - b[i] as f64) / b[i] as f64 * 100.0;
+                    cells.push(format!("{}→{} ({delta:+.1}%)", b[i], c[i]));
+                    if delta.abs() <= noise_pct {
+                        continue;
+                    }
+                    if delta > 0.0 {
+                        if worst_regression.is_none_or(|(_, w)| delta > w) {
+                            worst_regression = Some((i, delta));
+                        }
+                    } else if best_improvement.is_none_or(|(_, w)| delta < w) {
+                        best_improvement = Some((i, delta));
+                    }
+                }
+                let verdict = match (worst_regression, best_improvement) {
+                    (Some((i, _)), _) => format!("✗ REGRESSED ({})", NAMES[i]),
+                    (None, Some((i, _))) => format!("✓ improved ({})", NAMES[i]),
+                    (None, None) => "· within noise".to_string(),
                 };
-                let _ = writeln!(out, "| {label} | {regime} | {b} | {c} | {delta:+.1}% | {verdict} |");
-            }
-            (b, c) => {
                 let _ = writeln!(
                     out,
-                    "| {label} | {regime} | {} | {} | — | ? incomparable |",
-                    b.map(|v| v.to_string()).unwrap_or_else(|| "—".into()),
-                    c.map(|v| v.to_string()).unwrap_or_else(|| "—".into()),
+                    "| {label} | {regime} | {} | {} | {} | {verdict} |",
+                    cells[0], cells[1], cells[2]
+                );
+            }
+            (b, c) => {
+                // Missing on one side, or a zero baseline metric (no meaningful
+                // percentage): incomparable, never a win or a loss.
+                let p50 = |r: Option<&[u64; 3]>| r.map(|v| v[0].to_string()).unwrap_or_else(|| "—".into());
+                let _ = writeln!(
+                    out,
+                    "| {label} | {regime} | {}→{} | — | — | ? incomparable |",
+                    p50(b),
+                    p50(c),
                 );
             }
         }
@@ -326,7 +351,8 @@ fn compare_csvs(base_path: &str, cur_path: &str, noise_pct: f64) -> Result<Strin
     Ok(out)
 }
 
-fn parse_p50s(path: &str) -> Result<std::collections::HashMap<(String, String), u64>, String> {
+/// Parse `[p50, p99, p99.99]` per (label, regime) row; all three must parse.
+fn parse_percentiles(path: &str) -> Result<std::collections::HashMap<(String, String), [u64; 3]>, String> {
     let body = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
     let mut map = std::collections::HashMap::new();
     for line in body.lines().skip(1) {
@@ -337,8 +363,10 @@ fn parse_p50s(path: &str) -> Result<std::collections::HashMap<(String, String), 
         if f.len() < 9 {
             continue;
         }
-        if let Ok(p50) = f[4].parse::<u64>() {
-            map.insert((f[1].to_string(), f[0].to_string()), p50);
+        if let (Ok(p50), Ok(p99), Ok(p99_99)) =
+            (f[4].parse::<u64>(), f[5].parse::<u64>(), f[6].parse::<u64>())
+        {
+            map.insert((f[1].to_string(), f[0].to_string()), [p50, p99, p99_99]);
         }
     }
     Ok(map)
