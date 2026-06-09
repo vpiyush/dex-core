@@ -30,6 +30,9 @@ pub struct RunEnv {
     pub stamp: String,          // "YYYY-MM-DD_HH-MM-SS" UTC, filename-safe
     pub commit: Option<String>, // git short sha at run time; None off-git
     pub dirty: bool,            // tracked files modified since that commit
+    pub rustc: String,          // compiler that built this binary (from build.rs)
+    pub rustflags: String,      // flags cargo passed it; "" when none
+    pub profile: String,        // "release"/"debug", from debug_assertions
 }
 
 impl RunEnv {
@@ -54,6 +57,13 @@ impl RunEnv {
             stamp: utc_stamp(unix_secs),
             commit: git_short_sha(),
             dirty: git_dirty(),
+            // Baked in by build.rs at compile time (see its module doc): the
+            // resolved compiler and the flags cargo actually passed.
+            rustc: env!("BENCHKIT_RUSTC_VERSION").to_string(),
+            rustflags: env!("BENCHKIT_RUSTFLAGS").to_string(),
+            // debug_assertions tracks the profile family this code was compiled
+            // under: off for release/bench, on for dev/test.
+            profile: if cfg!(debug_assertions) { "debug" } else { "release" }.to_string(),
         }
     }
 
@@ -101,6 +111,12 @@ impl RunEnv {
             (None, _) => "unknown (not a git checkout)".to_string(),
         };
         let _ = writeln!(s, "- code: {code}");
+        let flags = if self.rustflags.is_empty() {
+            "(none)".to_string()
+        } else {
+            format!("`{}`", self.rustflags)
+        };
+        let _ = writeln!(s, "- build: {} · profile `{}` · rustflags {flags}", self.rustc, self.profile);
         let turbo = match self.turbo {
             Turbo::On => "on",
             Turbo::Off => "off",
@@ -267,6 +283,11 @@ mod tests {
         assert!(h.contains("Hardware:"));
         // the code line renders in both the in-git and off-git shapes.
         assert!(h.contains("- code:"));
+        // build provenance is baked in at compile time, so it is never empty,
+        // and under `cargo test` this very test compiles with debug_assertions.
+        assert!(!env.rustc.is_empty());
+        assert_eq!(env.profile, "debug");
+        assert!(h.contains("- build:"));
     }
 
     #[test]
