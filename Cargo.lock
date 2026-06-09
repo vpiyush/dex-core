@@ -420,6 +420,7 @@ dependencies = [
  "benchkit",
  "bytemuck",
  "core_affinity",
+ "dhat",
  "loom",
  "telemetry",
 ]

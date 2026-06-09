@@ -11,9 +11,10 @@ bytemuck = "1.25.0"
 loom = "0.7.2"
 
 [dev-dependencies]
-benchkit = { path = "../benchkit" }
+benchkit = { path = "../benchkit", features = ["alloc"] }
 telemetry = { path = "../telemetry", features = ["histogram"] }
 core_affinity = "0.8"
+dhat = "0.3"
 
 [[bench]]
 name = "self_latency"
