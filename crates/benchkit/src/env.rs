@@ -27,7 +27,9 @@ pub struct RunEnv {
     pub pinned: bool,     // affinity names exactly one core
     pub tsc_ghz: f64,
     pub unix_secs: u64,
-    pub stamp: String, // "YYYY-MM-DD_HH-MM-SS" UTC, filename-safe
+    pub stamp: String,          // "YYYY-MM-DD_HH-MM-SS" UTC, filename-safe
+    pub commit: Option<String>, // git short sha at run time; None off-git
+    pub dirty: bool,            // tracked files modified since that commit
 }
 
 impl RunEnv {
@@ -50,6 +52,21 @@ impl RunEnv {
             tsc_ghz: cal.ticks_per_nanosecond,
             unix_secs,
             stamp: utc_stamp(unix_secs),
+            commit: git_short_sha(),
+            dirty: git_dirty(),
+        }
+    }
+
+    /// Identity for this run's artifacts: the *code* that produced them, not the
+    /// time they ran. `<sha>` on a clean tree, `<sha>-dirty` otherwise, and the
+    /// timestamp off-git (so filenames are never empty). Reruns at the same
+    /// clean commit overwrite their artifacts — that is the point: one commit,
+    /// one canonical set of numbers. The header still records the timestamp.
+    pub fn run_id(&self) -> String {
+        match (&self.commit, self.dirty) {
+            (Some(sha), false) => sha.clone(),
+            (Some(sha), true) => format!("{sha}-dirty"),
+            (None, _) => self.stamp.clone(),
         }
     }
 
@@ -78,6 +95,12 @@ impl RunEnv {
         let mut s = String::new();
         let _ = writeln!(s, "# {title} — {} UTC (unix {})\n", self.stamp, self.unix_secs);
         let _ = writeln!(s, "**Hardware:** {}", self.cpu_model);
+        let code = match (&self.commit, self.dirty) {
+            (Some(sha), false) => format!("`{sha}`"),
+            (Some(sha), true) => format!("`{sha}` + uncommitted changes (dirty)"),
+            (None, _) => "unknown (not a git checkout)".to_string(),
+        };
+        let _ = writeln!(s, "- code: {code}");
         let turbo = match self.turbo {
             Turbo::On => "on",
             Turbo::Off => "off",
@@ -127,6 +150,35 @@ fn read_turbo() -> Turbo {
         Some("0") => Turbo::On,
         _ => Turbo::Unknown,
     }
+}
+
+/// Short sha of HEAD, captured at run time by shelling out to `git`. `None` when
+/// not in a git checkout (or git is absent) — callers fall back to the timestamp.
+/// Run-time capture is correct for the normal `cargo bench` flow where build and
+/// run happen back to back; a build-time stamp would survive `git checkout` but
+/// brings its own staleness traps (see the LLD discussion).
+fn git_short_sha() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!sha.is_empty()).then_some(sha)
+}
+
+/// Whether tracked files differ from HEAD. `--untracked-files=no` is the
+/// load-bearing flag: untracked files (bench-runs/, scratch docs) do not change
+/// the compiled binary, so they must not poison the run id with `-dirty`. Only
+/// a modified tracked file means "this binary may not match the sha".
+fn git_dirty() -> bool {
+    std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
 }
 
 fn read_affinity() -> String {
@@ -213,5 +265,25 @@ mod tests {
         let h = env.header("test_suite", "unit-test scope");
         assert!(h.contains("test_suite"));
         assert!(h.contains("Hardware:"));
+        // the code line renders in both the in-git and off-git shapes.
+        assert!(h.contains("- code:"));
+    }
+
+    #[test]
+    fn run_id_prefers_commit_and_marks_dirty() {
+        // detect() gives a valid base; override the git fields by hand so the
+        // test is deterministic in any checkout state (and off-git entirely).
+        let cal = telemetry::primitives::calibrate();
+        let mut env = RunEnv::detect(&cal);
+
+        env.commit = Some("abc1234".into());
+        env.dirty = false;
+        assert_eq!(env.run_id(), "abc1234");
+
+        env.dirty = true;
+        assert_eq!(env.run_id(), "abc1234-dirty");
+
+        env.commit = None;
+        assert_eq!(env.run_id(), env.stamp, "off-git falls back to the timestamp");
     }
 }

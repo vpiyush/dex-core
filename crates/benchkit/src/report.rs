@@ -144,7 +144,9 @@ impl<'a> Report<'a> {
         s
     }
 
-    /// Write `<dir>/<name>_<stamp>.{md,csv}` and `<dir>/<name>_<stamp>_hdr/<scenario>.hdr`.
+    /// Write `<dir>/<name>_<id>.{md,csv}` and `<dir>/<name>_<id>_hdr/<scenario>.hdr`,
+    /// where `<id>` is [`RunEnv::run_id`] — the git short sha (`-dirty` suffixed on
+    /// a modified tree), falling back to the UTC timestamp off-git.
     ///
     /// Directory resolution, in priority order: (1) `BENCH_OUT_DIR` env var, if
     /// set (used verbatim); (2) else `<workspace-root>/<dir>`, where the
@@ -162,13 +164,19 @@ impl<'a> Report<'a> {
             },
         };
         std::fs::create_dir_all(&dir)?;
-        let stamp = &self.env.stamp;
-        let md = PathBuf::from(format!("{dir}/{name}_{stamp}.md"));
-        let csv = PathBuf::from(format!("{dir}/{name}_{stamp}.csv"));
-        let hdr_dir = PathBuf::from(format!("{dir}/{name}_{stamp}_hdr"));
+        // Artifacts are keyed by the code that produced them (git sha, or the
+        // timestamp off-git), so a rerun at the same clean commit overwrites in
+        // place — one commit, one canonical set of numbers.
+        let id = self.env.run_id();
+        let md = PathBuf::from(format!("{dir}/{name}_{id}.md"));
+        let csv = PathBuf::from(format!("{dir}/{name}_{id}.csv"));
+        let hdr_dir = PathBuf::from(format!("{dir}/{name}_{id}_hdr"));
 
         std::fs::write(&md, self.to_markdown())?;
         std::fs::write(&csv, self.to_csv())?;
+        // Replace the hdr dir wholesale: a stale .hdr from a renamed scenario in
+        // an earlier run at this id must not survive into the new artifact set.
+        let _ = std::fs::remove_dir_all(&hdr_dir);
         std::fs::create_dir_all(&hdr_dir)?;
         let mut safe_labels = Vec::new();
         for section in &self.sections {
@@ -182,10 +190,10 @@ impl<'a> Report<'a> {
         // Emit a gnuplot script (a recipe, not an image): a log-percentile
         // latency overlay of every scenario, reading the .hdr files written
         // above. Render with `gnuplot <script>` → the sibling .svg.
-        let gnuplot = PathBuf::from(format!("{dir}/{name}_{stamp}.gnuplot"));
-        let svg = PathBuf::from(format!("{dir}/{name}_{stamp}.svg"));
-        let hdr_dirname = format!("{name}_{stamp}_hdr");
-        let svg_name = format!("{name}_{stamp}.svg");
+        let gnuplot = PathBuf::from(format!("{dir}/{name}_{id}.gnuplot"));
+        let svg = PathBuf::from(format!("{dir}/{name}_{id}.svg"));
+        let hdr_dirname = format!("{name}_{id}_hdr");
+        let svg_name = format!("{name}_{id}.svg");
         std::fs::write(&gnuplot, gnuplot_script(&self.title, &hdr_dirname, &svg_name, &safe_labels))?;
 
         Ok(RunPaths { markdown: md, csv, hdr_dir, gnuplot, svg })
