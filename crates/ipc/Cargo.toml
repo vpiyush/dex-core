@@ -10,5 +10,18 @@ bytemuck = "1.25.0"
 [target.'cfg(loom)'.dependencies]
 loom = "0.7.2"
 
+[dev-dependencies]
+benchkit = { path = "../benchkit" }
+telemetry = { path = "../telemetry", features = ["histogram"] }
+core_affinity = "0.8"
+
+[[bench]]
+name = "self_latency"
+harness = false
+
+[[bench]]
+name = "cross_core"
+harness = false
+
 [lints.rust]
 unexpected_cfgs  = {level = "warn", check-cfg = ['cfg(loom)']}
