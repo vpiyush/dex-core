@@ -23,8 +23,27 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::{Command, exit};
 
-/// Crates that currently ship a benchkit `*_bench` target.
-const BENCH_CRATES: &[&str] = &["arena", "orderbook", "matcher"];
+/// Crates that ship a benchkit latency bench, mapped to that bench target's
+/// name — the single source of truth for both "which crates" and "what the
+/// bench is called". Most follow the `<crate>_bench` convention; ipc's suite
+/// bench is `self_latency` (its `cross_core` bench pins two cores and runs on
+/// its own, e.g. via scripts/capture.sh — not part of the orchestrated sweep).
+const BENCH_CRATES: &[(&str, &str)] = &[
+    ("arena", "arena_bench"),
+    ("orderbook", "orderbook_bench"),
+    ("matcher", "matcher_bench"),
+    ("ipc", "self_latency"),
+];
+
+/// Latency bench target for a crate in [`BENCH_CRATES`].
+fn latency_bench(krate: &str) -> Option<&'static str> {
+    BENCH_CRATES.iter().find(|(k, _)| *k == krate).map(|(_, b)| *b)
+}
+
+/// The known crate names, for error messages and help text.
+fn bench_crate_list() -> String {
+    BENCH_CRATES.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(", ")
+}
 /// Crates that ship an iai (callgrind) bench target + the `iai` feature.
 const IAI_CRATES: &[&str] = &["matcher"];
 /// Crates that ship a dhat `alloc_proof` example.
@@ -60,12 +79,12 @@ fn run(args: &[String]) -> Result<(), String> {
 
     let opts = parse(args)?;
     let crates = if opts.all_crates {
-        BENCH_CRATES.iter().map(|s| s.to_string()).collect()
+        BENCH_CRATES.iter().map(|(k, _)| k.to_string()).collect()
     } else if let Some(c) = &opts.krate {
         vec![c.clone()]
     } else {
         // Default: every benched crate, latency only.
-        BENCH_CRATES.iter().map(|s| s.to_string()).collect()
+        BENCH_CRATES.iter().map(|(k, _)| k.to_string()).collect()
     };
 
     // Verify-before-claim: if a regime was requested, its tooling must be present,
@@ -121,9 +140,10 @@ fn run(args: &[String]) -> Result<(), String> {
 
 /// rdtscp latency — the default, zero-extra-deps pass.
 fn run_latency(krate: &str) -> Result<(), String> {
-    let bench = format!("{krate}_bench");
+    let bench = latency_bench(krate)
+        .ok_or_else(|| format!("[{krate}] no latency bench registered in BENCH_CRATES"))?;
     eprintln!("→ [{krate}] latency: cargo bench -p {krate} --bench {bench}");
-    cargo_bench(krate, &bench, &[])
+    cargo_bench(krate, bench, &[])
 }
 
 /// callgrind instruction/cache counts. Cannot share a process with rdtscp passes
@@ -163,14 +183,11 @@ fn run_alloc(krate: &str) -> Result<(), String> {
 /// scripts/perf_bench.sh. The script handles the build, taskset pinning, and
 /// sudo-if-paranoid.
 fn run_perfstat(krate: &str) -> Result<(), String> {
-    // ipc's latency bench isn't named `<crate>_bench`; pass the name explicitly.
-    let bench = match krate {
-        "ipc" => "self_latency".to_string(),
-        _ => format!("{krate}_bench"),
-    };
+    let bench = latency_bench(krate)
+        .ok_or_else(|| format!("[{krate}] no latency bench registered in BENCH_CRATES"))?;
     eprintln!("→ [{krate}] perfstat: scripts/perf_bench.sh {krate} 3 {bench}");
     let status = Command::new("scripts/perf_bench.sh")
-        .args([krate, "3", bench.as_str()])
+        .args([krate, "3", bench])
         .status()
         .map_err(|e| format!("failed to spawn scripts/perf_bench.sh: {e}"))?;
     if !status.success() {
@@ -208,12 +225,13 @@ fn run_plots(krate: &str) -> Result<(), String> {
 /// perf-record a latency run and emit a flamegraph SVG. Requires perf and the
 /// flamegraph scripts (stackcollapse-perf.pl / flamegraph.pl) on PATH.
 fn run_flamegraph(krate: &str) -> Result<(), String> {
-    let bench = format!("{krate}_bench");
+    let bench = latency_bench(krate)
+        .ok_or_else(|| format!("[{krate}] no latency bench registered in BENCH_CRATES"))?;
     eprintln!("→ [{krate}] flamegraph: perf record …");
 
     // Build the bench binary first so perf profiles the bench, not the build.
     let status = Command::new("cargo")
-        .args(["bench", "-p", krate, "--bench", &bench, "--no-run"])
+        .args(["bench", "-p", krate, "--bench", bench, "--no-run"])
         .status()
         .map_err(|e| format!("failed to spawn cargo: {e}"))?;
     if !status.success() {
@@ -392,8 +410,8 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         match args[i].as_str() {
             "--crate" => {
                 let c = args.get(i + 1).ok_or("--crate needs a value")?;
-                if !BENCH_CRATES.contains(&c.as_str()) {
-                    return Err(format!("unknown crate `{c}`; known: {}", BENCH_CRATES.join(", ")));
+                if latency_bench(c).is_none() {
+                    return Err(format!("unknown crate `{c}`; known: {}", bench_crate_list()));
                 }
                 krate = Some(c.clone());
                 i += 2;
@@ -497,6 +515,6 @@ fn print_help() {
          cargo bench-all\n  \
          cargo bench-all --crate matcher --intent latency,cache\n  \
          cargo bench-all --compare bench-runs/matcher_OLD.csv bench-runs/matcher_NEW.csv",
-        BENCH_CRATES.join(", ")
+        bench_crate_list()
     );
 }
