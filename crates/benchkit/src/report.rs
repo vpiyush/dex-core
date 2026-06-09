@@ -359,15 +359,22 @@ pub enum Verdict {
 struct CompRow {
     label: String,
     regime: String,
-    base_p50: Option<u64>,
-    cur_p50: Option<u64>,
+    base: Option<Row>,
+    cur: Option<Row>,
     verdict: Verdict,
+    /// The percentile that decided a non-noise verdict (worst regression, or
+    /// best improvement when nothing regressed).
+    driver: Option<&'static str>,
 }
 
 /// Compares two benchmark CSVs (each a `Report::to_csv` output). Serves both CI
 /// regression (baseline = previous commit) and A/B testing (baseline = the other
 /// implementation). Matches rows by (label, regime); a within-`noise_pct` delta
 /// is `WithinNoise`, never a win/loss — the anti-self-deception guard.
+///
+/// The verdict is the WORST metric across p50, p99, and p99.99: a flat p50
+/// cannot mask a blown-out tail, and a p50 improvement does not excuse one.
+/// Anything else would contradict the "honest tails" thesis the reports make.
 pub struct Comparison {
     rows: Vec<CompRow>,
     noise_pct: f64,
@@ -393,15 +400,16 @@ impl Comparison {
             let (label, regime) = key.clone();
             match cur.get(key) {
                 Some(c) => {
-                    let verdict = classify(b.p50, c.p50, noise_pct);
-                    rows.push(CompRow { label, regime, base_p50: Some(b.p50), cur_p50: Some(c.p50), verdict });
+                    let (verdict, driver) = classify_pair(b, c, noise_pct);
+                    rows.push(CompRow { label, regime, base: Some(*b), cur: Some(*c), verdict, driver });
                 }
                 None => rows.push(CompRow {
                     label,
                     regime,
-                    base_p50: Some(b.p50),
-                    cur_p50: None,
+                    base: Some(*b),
+                    cur: None,
                     verdict: Verdict::Incomparable,
+                    driver: None,
                 }),
             }
         }
@@ -409,7 +417,7 @@ impl Comparison {
         for (key, c) in &cur {
             if !seen.contains(key) {
                 let (label, regime) = key.clone();
-                rows.push(CompRow { label, regime, base_p50: None, cur_p50: Some(c.p50), verdict: Verdict::Incomparable });
+                rows.push(CompRow { label, regime, base: None, cur: Some(*c), verdict: Verdict::Incomparable, driver: None });
             }
         }
         rows.sort_by(|a, b| a.label.cmp(&b.label));
@@ -419,27 +427,26 @@ impl Comparison {
     pub fn to_markdown(&self) -> String {
         let mut s = String::new();
         let _ = writeln!(s, "# Benchmark comparison (noise band ±{:.1}%)\n", self.noise_pct);
-        let _ = writeln!(s, "| scenario | regime | base p50 | cur p50 | Δ% | verdict |");
+        let _ = writeln!(s, "Each cell is `base→current (Δ%)` in ns. The verdict is the worst metric of the three.\n");
+        let _ = writeln!(s, "| scenario | regime | p50 | p99 | p99.99 | verdict |");
         let _ = writeln!(s, "|---|---|--:|--:|--:|---|");
         for r in &self.rows {
-            let delta_pct = match (r.base_p50, r.cur_p50) {
-                (Some(b), Some(c)) if b > 0 => format!("{:+.1}%", (c as f64 - b as f64) / b as f64 * 100.0),
-                _ => "—".into(),
-            };
-            let verdict = match r.verdict {
-                Verdict::Improved => "✓ improved",
-                Verdict::Regressed => "✗ REGRESSED",
-                Verdict::WithinNoise => "· within noise",
-                Verdict::Incomparable => "? incomparable",
+            let verdict = match (r.verdict, r.driver) {
+                (Verdict::Improved, Some(m)) => format!("✓ improved ({m})"),
+                (Verdict::Improved, None) => "✓ improved".into(),
+                (Verdict::Regressed, Some(m)) => format!("✗ REGRESSED ({m})"),
+                (Verdict::Regressed, None) => "✗ REGRESSED".into(),
+                (Verdict::WithinNoise, _) => "· within noise".into(),
+                (Verdict::Incomparable, _) => "? incomparable".into(),
             };
             let _ = writeln!(
                 s,
                 "| {} | {} | {} | {} | {} | {} |",
                 r.label,
                 r.regime,
-                r.base_p50.map(|v| v.to_string()).unwrap_or_else(|| "—".into()),
-                r.cur_p50.map(|v| v.to_string()).unwrap_or_else(|| "—".into()),
-                delta_pct,
+                delta_cell(r.base.map(|b| b.p50), r.cur.map(|c| c.p50)),
+                delta_cell(r.base.map(|b| b.p99), r.cur.map(|c| c.p99)),
+                delta_cell(r.base.map(|b| b.p99_99), r.cur.map(|c| c.p99_99)),
                 verdict,
             );
         }
@@ -452,26 +459,69 @@ impl Comparison {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Row {
     p50: u64,
+    p99: u64,
+    p99_99: u64,
 }
 
-fn classify(base: u64, cur: u64, noise_pct: f64) -> Verdict {
-    if base == 0 {
-        return Verdict::Incomparable;
+/// Worst-of-three classification. Per metric: within the noise band is neutral,
+/// above it is a regression, below it an improvement. Any regression makes the
+/// row `Regressed` (driver = the largest one); otherwise any improvement makes
+/// it `Improved` (driver = the largest one); otherwise `WithinNoise`. A zero
+/// baseline metric makes the row `Incomparable` (no meaningful percentage).
+fn classify_pair(base: &Row, cur: &Row, noise_pct: f64) -> (Verdict, Option<&'static str>) {
+    let pairs = [
+        ("p50", base.p50, cur.p50),
+        ("p99", base.p99, cur.p99),
+        ("p99.99", base.p99_99, cur.p99_99),
+    ];
+    if pairs.iter().any(|&(_, b, _)| b == 0) {
+        return (Verdict::Incomparable, None);
     }
-    let change = (cur as f64 - base as f64) / base as f64 * 100.0;
-    if change.abs() <= noise_pct {
-        Verdict::WithinNoise
-    } else if change < 0.0 {
-        Verdict::Improved
-    } else {
-        Verdict::Regressed
+    let mut worst_regression: Option<(&'static str, f64)> = None;
+    let mut best_improvement: Option<(&'static str, f64)> = None;
+    for (name, b, c) in pairs {
+        let change = (c as f64 - b as f64) / b as f64 * 100.0;
+        if change.abs() <= noise_pct {
+            continue;
+        }
+        if change > 0.0 {
+            if worst_regression.is_none_or(|(_, w)| change > w) {
+                worst_regression = Some((name, change));
+            }
+        } else if best_improvement.is_none_or(|(_, w)| change < w) {
+            best_improvement = Some((name, change));
+        }
+    }
+    match (worst_regression, best_improvement) {
+        (Some((m, _)), _) => (Verdict::Regressed, Some(m)),
+        (None, Some((m, _))) => (Verdict::Improved, Some(m)),
+        (None, None) => (Verdict::WithinNoise, None),
+    }
+}
+
+/// One `base→current (Δ%)` table cell; `—` stands in for a missing side.
+fn delta_cell(base: Option<u64>, cur: Option<u64>) -> String {
+    match (base, cur) {
+        (Some(b), Some(c)) => {
+            if b > 0 {
+                format!("{b}→{c} ({:+.1}%)", (c as f64 - b as f64) / b as f64 * 100.0)
+            } else {
+                format!("{b}→{c}")
+            }
+        }
+        (Some(b), None) => format!("{b}→—"),
+        (None, Some(c)) => format!("—→{c}"),
+        (None, None) => "—".into(),
     }
 }
 
 /// Parse a `Report::to_csv` body into a map keyed by (label, regime).
-/// Header: `regime,label,count,min_ns,p50_ns,p99_ns,p99_99_ns,max_ns,msgs_per_sec`.
+/// Header: `regime,label,count,min_ns,p50_ns,p99_ns,p99_99_ns,max_ns,msgs_per_sec`,
+/// optionally followed by the appended rusage columns (ignored here). All three
+/// tracked percentiles must parse for a row to participate.
 fn parse_csv(body: &str) -> std::collections::HashMap<(String, String), Row> {
     let mut map = std::collections::HashMap::new();
     for line in body.lines().skip(1) {
@@ -479,14 +529,16 @@ fn parse_csv(body: &str) -> std::collections::HashMap<(String, String), Row> {
             continue;
         }
         let f: Vec<&str> = line.split(',').collect();
-        // regime, label, count, min, p50, p99, p99_99, max, msgs/s
+        // regime, label, count, min, p50, p99, p99_99, max, msgs/s, [rusage…]
         if f.len() < 9 {
             continue;
         }
         let regime = f[0].to_string();
         let label = f[1].to_string();
-        if let Ok(p50) = f[4].parse::<u64>() {
-            map.insert((label, regime), Row { p50 });
+        if let (Ok(p50), Ok(p99), Ok(p99_99)) =
+            (f[4].parse::<u64>(), f[5].parse::<u64>(), f[6].parse::<u64>())
+        {
+            map.insert((label, regime), Row { p50, p99, p99_99 });
         }
     }
     map
@@ -496,11 +548,11 @@ fn parse_csv(body: &str) -> std::collections::HashMap<(String, String), Row> {
 mod tests {
     use super::*;
 
-    fn csv(rows: &[(&str, &str, u64)]) -> String {
+    fn csv(rows: &[(&str, &str, u64, u64, u64)]) -> String {
         let mut s = format!("regime,{}\n", Histogram::csv_header());
-        for (regime, label, p50) in rows {
+        for (regime, label, p50, p99, p99_99) in rows {
             // regime,label,count,min,p50,p99,p99_99,max,msgs/s
-            s.push_str(&format!("{regime},{label},1000,1,{p50},{p50},{p50},{p50},0\n"));
+            s.push_str(&format!("{regime},{label},1000,1,{p50},{p99},{p99_99},{p99_99},0\n"));
         }
         s
     }
@@ -534,8 +586,8 @@ mod tests {
 
     #[test]
     fn within_noise_is_not_a_win() {
-        let base = csv(&[("back_to_back", "cross", 100)]);
-        let cur = csv(&[("back_to_back", "cross", 101)]); // +1%
+        let base = csv(&[("back_to_back", "cross", 100, 100, 100)]);
+        let cur = csv(&[("back_to_back", "cross", 101, 101, 101)]); // +1%
         let c = Comparison::from_strings(&base, &cur, 5.0);
         assert!(!c.any_regressed());
         assert!(c.to_markdown().contains("within noise"));
@@ -543,16 +595,16 @@ mod tests {
 
     #[test]
     fn regression_beyond_band_is_flagged() {
-        let base = csv(&[("back_to_back", "cross", 100)]);
-        let cur = csv(&[("back_to_back", "cross", 130)]); // +30%
+        let base = csv(&[("back_to_back", "cross", 100, 100, 100)]);
+        let cur = csv(&[("back_to_back", "cross", 130, 130, 130)]); // +30%
         let c = Comparison::from_strings(&base, &cur, 5.0);
         assert!(c.any_regressed());
     }
 
     #[test]
     fn improvement_detected() {
-        let base = csv(&[("back_to_back", "cross", 100)]);
-        let cur = csv(&[("back_to_back", "cross", 70)]); // -30%
+        let base = csv(&[("back_to_back", "cross", 100, 100, 100)]);
+        let cur = csv(&[("back_to_back", "cross", 70, 70, 70)]); // -30%
         let c = Comparison::from_strings(&base, &cur, 5.0);
         assert!(!c.any_regressed());
         assert!(c.to_markdown().contains("improved"));
@@ -562,11 +614,32 @@ mod tests {
     fn same_label_different_regime_does_not_match() {
         // A back-to-back baseline and an open-loop current for the "same" label
         // are different keys → each shows as incomparable, never subtracted.
-        let base = csv(&[("back_to_back", "cross", 100)]);
-        let cur = csv(&[("open_loop", "cross", 500)]);
+        let base = csv(&[("back_to_back", "cross", 100, 100, 100)]);
+        let cur = csv(&[("open_loop", "cross", 500, 500, 500)]);
         let c = Comparison::from_strings(&base, &cur, 5.0);
         assert!(!c.any_regressed(), "cross-regime must not be read as a regression");
         let md = c.to_markdown();
         assert_eq!(md.matches("incomparable").count(), 2);
+    }
+
+    #[test]
+    fn tail_regression_caught_when_p50_flat() {
+        // p50 identical, p99 inside the band, p99.99 doubled: the old p50-only
+        // comparison called this clean. It must fail, and name the driver.
+        let base = csv(&[("back_to_back", "cross", 100, 200, 400)]);
+        let cur = csv(&[("back_to_back", "cross", 100, 205, 800)]);
+        let c = Comparison::from_strings(&base, &cur, 5.0);
+        assert!(c.any_regressed(), "a doubled p99.99 must fail even with a flat p50");
+        assert!(c.to_markdown().contains("REGRESSED (p99.99)"));
+    }
+
+    #[test]
+    fn p50_improvement_does_not_mask_tail_regression() {
+        // Halved p50, doubled p99.99: worst metric wins, so this is a regression.
+        let base = csv(&[("back_to_back", "cross", 100, 200, 400)]);
+        let cur = csv(&[("back_to_back", "cross", 50, 200, 800)]);
+        let c = Comparison::from_strings(&base, &cur, 5.0);
+        assert!(c.any_regressed(), "an improved p50 must not excuse a blown tail");
+        assert!(c.to_markdown().contains("REGRESSED (p99.99)"));
     }
 }
