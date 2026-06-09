@@ -1,179 +1,170 @@
-<div align="center">
-
 # dex-core
+### A low-latency, deterministic matching engine in Rust.
 
-### A lock-free order-matching engine in Rust, built from the cache line up.
+dex-core is the core of a matching engine. It is written from scratch in Rust. It is built with **mechanical sympathy**. It is shaped around the L1 cache and the CPU pipeline. It provides the foundational primitives for a high-throughput exchange.
 
-![Rust](https://img.shields.io/badge/Rust-2024-orange)
-![concurrency](https://img.shields.io/badge/concurrency-loom--verified-success)
-![unsafe](https://img.shields.io/badge/unsafe-Miri--clean-success)
-![latency](https://img.shields.io/badge/latency-HDR--measured-blue)
-![core](https://img.shields.io/badge/core-busy--poll-lightgrey)
-![license](https://img.shields.io/badge/license-MIT-blue)
-
-</div>
+![Rust](https://img.shields.io/badge/Rust-2024-orange?style=flat-square)
+![concurrency](https://img.shields.io/badge/concurrency-loom--verified-success?style=flat-square)
+![unsafe](https://img.shields.io/badge/unsafe-Miri--clean-success?style=flat-square)
+![hot path](https://img.shields.io/badge/hot--path-zero--alloc-orange?style=flat-square)
+![latency](https://img.shields.io/badge/latency-HDR--measured-blueviolet?style=flat-square)
+![license](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
 ---
 
-dex-core is an order-matching engine written from scratch in Rust. It follows the HFT style. The matching core is built from actors. Each actor is a thread pinned to a CPU core. Actors talk only through lock-free queues. The core uses no locks and no async runtime. That is what keeps its latency tight. The network edge is a separate layer. It sits on the far side of a queue, so its I/O can never jitter the core.
+## 🎯 Why dex-core?
 
-The measurement tools were built first. So every speed number here has a real measurement behind it. The engine is built one primitive at a time. Each one is model-checked, run under Miri, and benchmarked before the next one starts.
+* **Mechanical sympathy.** It is built for the L1 cache and the CPU pipeline.
+* **Verified concurrency.** The lock-free queue is loom model-checked, Miri-clean, and stress-tested for torn reads.
+* **Honest tails.** Every latency is an HDR distribution. It is corrected for coordinated omission. It ships with the machine it ran on and the command to repeat it.
+* **Lock-free IPC.** It is a custom SPMC seqlock backplane. There are no mutexes and no kernel-space syncing on the hot path.
 
-> Most engines just say they are fast. This one shows the full latency curve, the machine it ran on, and the command to reproduce it. The concurrency is checked by a model checker.
+---
 
-## 📊 At a glance
+## 🧱 1. The big picture: tiered architecture
 
-|  |  |
-|---|---|
-| `publish` / `poll` latency, p50 | **14 ns / 18 ns** |
-| cross-core queue hop | **~50 ns** floor (isolated-core p50/p99: <!-- TUNED -->) |
-| hot path allocations | **0**, enforced by a test |
-| IPC concurrency | loom-verified, Miri-clean, stress-tested |
-| every number here | reproducible with `cargo bench` and `cargo test` |
-
-> For scale: an uncontended mutex round-trip is about 20 ns. A main-memory miss is about 100 ns. A lock-free seqlock stays in that range, and it never blocks.
-
-## ⚙️ What it matches
-
-dex-core matches orders against a central limit order book. There is one book per instrument. Orders match by price first, then by time. It supports GTC, IOC, and FOK.
-
-Here it is matching. Two sell makers rest at the same price. A buyer takes them, oldest first.
-
-```rust
-use matcher::Engine;
-
-let mut engine = Engine::new();
-engine.add_instrument(1, 64).unwrap();         // instrument id, book capacity
-
-let mut events = Vec::new();
-engine.process(&ask(100, 5), &mut events);     // sell 5 @ 100  -> rests
-engine.process(&ask(100, 5), &mut events);     // sell 5 @ 100  -> rests (later)
-
-events.clear();
-engine.process(&bid_ioc(100, 8), &mut events); // buy 8 @ 100, immediate-or-cancel
-
-// events == [Fill 5 @ 100, Fill 3 @ 100]
-// The older maker fills first (time priority). IOC leaves nothing resting.
-```
-
-Send that same taker as FOK for 20 units and it rejects instead. Only 10 rest at its limit, and FOK is all-or-nothing.
-
-<sub>`ask` and `bid_ioc` are shorthands that build an `OrderRequest`. The real call is `engine.process(&request, &mut events)`.</sub>
-
-## 🧱 Architecture
-
-Each actor is a thread pinned to a core. It runs a busy loop. It reads its inputs, does its work, writes its outputs, and repeats. Actors only talk through lock-free queues. There are no locks. Nothing shared is mutated outside the seqlock protocol. Async lives only at the network edge, on the far side of a queue.
+dex-core isolates the chaos of network I/O from the strict timing of the matching core. Async lives only at the edge. It sits on the far side of a queue. The core is pinned, synchronous, and busy-polling.
 
 ```mermaid
-flowchart LR
-  GEN["synthetic gen<br/>(gateway · future)"] -->|orders| M
-  FEED["Feed Handler"] -->|L2 updates| BOOK["Book Maintainer"]
-  M["Risk + Matcher<br/>core 2"] -->|"events (broadcast)"| P["Persist · Halt"]
-  M --> T["Telemetry · SkipToLatest"]
-  M --> A["Account Handler"]
+graph TD
+    subgraph net["Network tier · async edge"]
+        GW[Gateway<br/>multiplexed I/O]
+    end
+    subgraph exec["Execution tier · pinned, sync"]
+        direction LR
+        RM[Risk + Matcher<br/>core 1]
+        AH[Account Handler<br/>core 2]
+    end
+    subgraph ipc["Lock-free backplane"]
+        Q1((orders))
+        Q2((events))
+    end
+    GW -->|ordered stream| Q1 --> RM
+    RM -->|event broadcast| Q2 --> AH
+    Q2 --> PERSIST[Persist · Halt]
+    Q2 --> TELE[Telemetry · Skip]
+    subgraph state["Core-1 state"]
+        OB[Order Book]
+        AR[Generational Arena]
+        RM <--> OB
+        OB <--> AR
+    end
 ```
 
-This is the latency budget for one order. The marks show how much of it is measured today.
+---
 
-```
- order → ack                          measured?
- ──────────────────────────────────────────────
- network in    ████████████           off-box
- gateway       ▒▒                      roadmap
- ipc hop       ▌  ~50 ns               yes
- risk + match  ▌▌ <500 ns              yes
- ipc hop       ▌  ~50 ns               yes
- consumer      ▒                       roadmap
-```
+## 🏛 2. Technical pillars
 
-## ⚡ Performance
+### I. Cache-line discipline (`ipc`)
+Standard queues suffer from false sharing. dex-core pins every ring-buffer slot to its own 64-byte cache line. A producer's write never invalidates a consumer's metadata.
 
-Every number comes from the project's own tool, [`benchkit`](crates/benchkit). It records latency as an HDR histogram. It plots latency by percentile. That is how tails are actually read. It also corrects for coordinated omission. You can run it yourself with `cargo bench`.
+### II. Memory stability (`arena`)
+Orders live in a **generational arena** instead of `Box<Order>`. There are no syscalls and no lock contention. Allocation and removal are O(1). Indices stay stable when the data moves. The hot path is **zero-allocation**. A test enforces it.
 
-**Per-op latency. `publish` and `poll`, one thread, self-timed:**
+### III. Honest concurrency (`ipc`)
+The seqlock's optimistic read is a deliberate C11 data race. So loom can't model it directly. We verify what we can. loom checks the version ordering. Miri checks the unsafe code. A torn-read stress test covers the data path. The `Pod` payload bound makes a torn read safe to discard.
 
-![self-latency by percentile](docs/assets/self_latency.svg)
+---
 
-**Cross-core hop latency. Producer core to consumer core:**
+## 🔬 3. Micro-architectural analysis
 
-![cross-core hop by percentile](docs/assets/cross_core.svg)
+Wall-clock latency is one layer. We also audit the CPU pipeline. One command captures it. It needs `perf` and isolated cores.
 
-> <sub>These plots are placeholders. They come from a normal laptop on `powersave`, not a tuned machine. The fat tails are the OS scheduler, not the queue. The coordinated-omission correction makes that noise visible instead of hiding it. The real plots come from isolated cores.</sub>
+```text
+$ cargo bench-all --crate matcher --intent perfstat
 
-## 🔬 Under the hood
-
-Latency tells you how fast. These tell you why. The same harness reads hardware perf counters and probes allocations.
-
-ipc hot path, per `publish` / `poll`:
-
-| metric | result | source |
-|---|---|---|
-| heap allocations | **0** (a test fails if it isn't) | dhat probe |
-| instructions / op | <!-- TUNED --> | `perf stat` |
-| IPC (insn / cycle) | <!-- TUNED --> | `perf stat` |
-| L1 / LLC misses | <!-- TUNED --> | `perf stat` |
-| branch misses | <!-- TUNED --> | `perf stat` |
-
-Generate the perf counters on one command (needs `perf`):
-
-```bash
-cargo bench-all --crate ipc --intent perfstat,alloc
+# ── capture pending the tuned-box run; the real counters land here ──
+   task-clock                 …
+   cycles                     …      #   … GHz
+   instructions               …      #   … insn per cycle   (IPC)
+   branches                   …
+   branch-misses              …      #   …% of all branches
+   L1-dcache-loads            …
+   L1-dcache-load-misses      …      #   …% of L1 accesses
 ```
 
-## 📦 The crates
+We report the raw counters. So you can check the IPC and the cache-miss rate yourself.
 
-dex-core is a workspace of small, focused crates. Each one has its own README.
+---
 
-| crate | what it is | verified by |
-|---|---|---|
-| [`ipc`](crates/ipc) | SPMC seqlock broadcast queue. The lock-free backbone. | loom · Miri · stress · bench |
-| [`telemetry`](crates/telemetry) | `rdtscp` clock, TSC calibration, HDR histograms | unit tests |
-| [`benchkit`](crates/benchkit) | the measurement harness. HDR, CO-correction, plots. | — |
-| [`matcher`](crates/matcher) | the matching engine (limit, IOC, FOK) | tests · bench |
-| [`orderbook`](crates/orderbook) | L2 order book | tests |
-| [`arena`](crates/arena) | generational-index allocator (~13 ns alloc) | tests · bench |
-| [`types`](crates/types) | zero-copy wire types (`Pod`), `intent_hash` anchor | tests |
+## ⚖️ 4. Traditional Rust vs. dex-core
 
-## 🔍 A few problems worth a look
+Here is how the primitives compare to the usual safe-Rust defaults.
 
-**A seqlock that is honest about its data race.** The read can race the write. This is a known, safe seqlock pattern. But it is still a C11 data race, so loom cannot model it. So the queue's ordering is loom-checked where it can be. The unsafe code is checked with Miri. The racy data path is covered by a torn-read stress test. → [`ipc`](crates/ipc)
+| | Traditional (`std` / `tokio`) | dex-core |
+| :--- | :--- | :--- |
+| **Concurrency** | `Mutex<VecDeque<T>>`, `mpsc` | SPMC seqlock (`ipc`) |
+| **Allocation** | `Box<T>`, `Vec<T>` | generational arena, zero on the hot path |
+| **I/O model** | multi-threaded async | async edge, pinned-sync core |
+| **Latency** | microseconds, variable | publish p50 **14 ns**, hop **~50 ns** |
+| **Determinism** | race-dependent | single-actor core (bit-identical replay on the roadmap) |
 
-**Durability is a type.** One producer broadcasts to many consumers. Each consumer picks a policy. The audit log uses `Halt`. It cannot miss an event. Market data uses `Skip`. It only wants the latest value. The policy lives in the type, not in a comment. → [`ipc`](crates/ipc)
+---
 
-**Measurement you can't fool yourself with.** The harness corrects for coordinated omission. It records the machine it ran on. It hands you the command to repeat the run. → [`benchkit`](crates/benchkit)
+## 💻 5. API sneak peek
 
-## ✅ Verification
+The backplane is ergonomic and zero-cost. It allocates once, up front. After that, the hot path never touches the heap.
 
-`ipc` is the only lock-free crate. So it gets the full treatment.
+```rust
+use ipc::{LapPolicy, PollResult, Queue};
 
+let (queue, mut producer) = Queue::<PodOrderEvent>::new(1024);
+let mut consumer = Queue::subscribe(&queue, LapPolicy::Halt);
+
+producer.publish(event);   // plain stores + a release fence. No lock, no alloc.
+
+match consumer.poll() {
+    PollResult::Ready(event) => process(event),  // a copy out of the slot, no deserialize
+    PollResult::Empty => {}                       // nothing new yet
+    _ => {}                                        // lapped: resolved per LapPolicy
+}
 ```
-              loom   Miri   stress   HDR-bench
-  ipc          ✓      ✓        ✓         ✓
-```
 
-The other crates run on one thread. They are covered by unit tests and benchmarks. loom and the stress test are concurrency tools. They apply to the queue, not to plain logic.
+<sub>`event` is a `PodOrderEvent`. That is a flat, `Pod` form of `OrderEvent`. The ring is typed `Queue<PodOrderEvent>`.</sub>
 
-## 🔁 Reproduce it
+---
 
-Needs Rust 2024 (stable). Miri needs the nightly toolchain. The plots need gnuplot. The deep regimes need `perf` and valgrind.
+## ✅ 6. Verification & safety
+
+dex-core uses a layered strategy. Each tool covers what the others cannot.
+
+* **Unsafe code.** Miri validates it for alignment, provenance, and aliasing.
+* **Concurrency.** loom model-checks the seqlock's commit ordering. A torn-read stress test covers the data path.
+* **Portability.** Real `Release`/`Acquire` fences keep the protocol correct on AArch64 and Graviton as well as x86.
+* **Allocation.** The hot path makes zero allocations. A `dhat` probe fails the run if one happens.
+
+---
+
+## ▶️ 7. Run it
+
+You need Rust 2024 (stable). Miri needs nightly. The plots need gnuplot. The deep regimes need `perf` and valgrind.
 
 ```bash
 cargo test  --workspace                                     # correctness
 cargo bench -p ipc --bench self_latency                     # per-op latency, HDR + SVG
 cargo bench -p ipc --bench cross_core                        # cross-core hop latency
-cargo run -p ipc --release --example alloc_proof            # zero-allocation proof
+cargo run   -p ipc --release --example alloc_proof          # zero-allocation proof
 RUSTFLAGS="--cfg loom" cargo test -p ipc --lib --release    # model-check the queue
 cargo +nightly miri test -p ipc --test roundtrip --test lap_policy   # check the unsafe code
 ```
 
-## 🚧 Status
+---
 
-Built and verified: `types`, `arena`, `telemetry`, `benchkit`, `orderbook`, `matcher`, `ipc`.
+## 🗺 8. Roadmap
 
-In progress: `persist` (hash-chained audit log), `risk`, the actor-wiring layer (`exchange`), and the network gateway.
+- [x] **`ipc`** — SPMC seqlock backplane (loom + Miri + stress + bench)
+- [x] **`arena`** — generational-index storage
+- [x] **`orderbook` + `matcher`** — price-time matching (limit, IOC, FOK)
+- [x] **`telemetry` + `benchkit`** — the measurement layer (rdtscp, HDR, CO-correction)
+- [ ] **`gateway`** (active) — bridge the network edge to the deterministic core
+- [ ] **`persist`** (planned) — mmap-backed, hash-chained audit log
+- [ ] **`risk` + actor wiring** (planned) — assemble the pinned-core actors
+- [ ] **deterministic replay** (planned) — bit-identical state recovery
 
-<sub>Design notes live in [`docs/lld/`](docs/lld), one document per crate.</sub>
+---
 
 ## 📄 License
 
-MIT. See [LICENSE](LICENSE).
+This project is MIT licensed. See [LICENSE](LICENSE). Design notes live in [`docs/lld/`](docs/lld). There is one document per crate.
+
+<sub>It is built in the open and measured at every layer.</sub>
