@@ -28,7 +28,7 @@ const BENCH_CRATES: &[&str] = &["arena", "orderbook", "matcher"];
 /// Crates that ship an iai (callgrind) bench target + the `iai` feature.
 const IAI_CRATES: &[&str] = &["matcher"];
 /// Crates that ship a dhat `alloc_proof` example.
-const ALLOC_CRATES: &[&str] = &["matcher"];
+const ALLOC_CRATES: &[&str] = &["matcher", "ipc"];
 
 fn main() {
     // The `cargo bench-all -- <args>` alias already strips one `--`, but if the
@@ -163,9 +163,14 @@ fn run_alloc(krate: &str) -> Result<(), String> {
 /// scripts/perf_bench.sh. The script handles the build, taskset pinning, and
 /// sudo-if-paranoid.
 fn run_perfstat(krate: &str) -> Result<(), String> {
-    eprintln!("→ [{krate}] perfstat: scripts/perf_bench.sh {krate}");
+    // ipc's latency bench isn't named `<crate>_bench`; pass the name explicitly.
+    let bench = match krate {
+        "ipc" => "self_latency".to_string(),
+        _ => format!("{krate}_bench"),
+    };
+    eprintln!("→ [{krate}] perfstat: scripts/perf_bench.sh {krate} 3 {bench}");
     let status = Command::new("scripts/perf_bench.sh")
-        .arg(krate)
+        .args([krate, "3", bench.as_str()])
         .status()
         .map_err(|e| format!("failed to spawn scripts/perf_bench.sh: {e}"))?;
     if !status.success() {

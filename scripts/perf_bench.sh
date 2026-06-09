@@ -19,7 +19,9 @@ set -euo pipefail
 
 CRATE="${1:-matcher}"
 CORE="${2:-3}"
-BENCH="${CRATE}_bench"
+# Bench target name. Defaults to `<crate>_bench`; pass a 3rd arg for crates that
+# deviate (e.g. ipc uses `self_latency`).
+BENCH="${3:-${CRATE}_bench}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
