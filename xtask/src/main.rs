@@ -587,7 +587,7 @@ fn render_plots_in(dir: &Path) -> Result<(), String> {
     if dir.join("ipc_cross_core.hdr").exists() {
         // HdrHistogram percentile columns: value, percentile, count, 1/(1-pct).
         // Plot value (col 1) against the log-percentile axis (col 4).
-        let script = "set terminal svg size 1100,680 font 'sans,11'; \
+        let script = "set terminal svg size 1100,680 font 'sans,11' background '#ffffff'; \
              set output 'ipc_cross_core.svg'; \
              set title 'ipc cross-core hop — latency by percentile'; \
              set xlabel 'Percentile'; set ylabel 'Latency (ns)'; \
