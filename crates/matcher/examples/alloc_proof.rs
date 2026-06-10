@@ -75,10 +75,11 @@ const PRICE: u64 = 1_000;
 const DEPTH: u64 = 256; // pre-warm the level's VecDeque capacity
 
 fn main() {
-    // Profiler writes dhat-heap.json on drop (view at dh_view.html).
-    let _profiler = dhat::Profiler::builder()
-        .file_name("bench-runs/alloc_proof_dhat-heap.json")
-        .build();
+    // Profiler writes its json on drop (view at dh_view.html).
+    let out = benchkit::out_dir();
+    std::fs::create_dir_all(&out).expect("create out dir");
+    let dhat_json = out.join("matcher_alloc_proof_dhat-heap.json");
+    let _profiler = dhat::Profiler::builder().file_name(&dhat_json).build();
 
     // ----- Scenario A: zero-alloc steady state (the hot path) --------------
     // One bid level pre-filled to DEPTH so its VecDeque/HashMap are warm; then
@@ -130,6 +131,6 @@ fn main() {
         "| B: cross emptying+recreating level (churn)  | {MEASURE} | {} | {} | {:.4} |",
         b_delta.blocks, b_delta.bytes, b_delta.blocks as f64 / MEASURE as f64
     );
-    println!("\nDHAT detail: bench-runs/alloc_proof_dhat-heap.json (view at dh_view.html)");
+    println!("\nDHAT detail: {} (view at dh_view.html)", dhat_json.display());
     println!("\n✓ Hot path is zero-allocation (scenario A: 0 blocks across {MEASURE} steps).");
 }
