@@ -222,7 +222,10 @@ fn sanitize(label: &str) -> String {
 fn gnuplot_script(title: &str, hdr_dirname: &str, svg_name: &str, labels: &[String]) -> String {
     let mut s = String::new();
     s.push_str("# benchkit latency curve — render with: gnuplot <this file> (run from this dir)\n");
-    s.push_str("set terminal svg size 1100,680 font 'sans,11'\n");
+    // Explicit background: README embeds these on GitHub, where dark mode
+    // renders a transparent SVG's black text invisible. An opaque card reads
+    // on both themes.
+    s.push_str("set terminal svg size 1100,680 font 'sans,11' background '#ffffff'\n");
     s.push_str(&format!("set output '{svg_name}'\n"));
     s.push_str(&format!("set title \"{} — latency by percentile\"\n", gp_escape(title)));
     s.push_str("set xlabel 'Percentile'\n");
