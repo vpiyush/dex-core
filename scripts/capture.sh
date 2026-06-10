@@ -51,6 +51,14 @@ PERF_CORE="${PERF_CORE:-3}"   # perf stat pins here
 mkdir -p "$OUT"
 OUT_ABS="$(cd "$OUT" && pwd)"
 
+# The capture dir is the canonical record of ONE run. Artifacts are commit-keyed,
+# so a rerun after a commit writes new names next to the old ones and the dir
+# becomes a mix of two runs. Start from empty instead.
+if [ -n "$(ls -A "$OUT_ABS" 2>/dev/null)" ]; then
+  echo "-> $OUT is not empty; clearing previous capture so runs don't mix"
+  rm -rf "${OUT_ABS:?}"/*
+fi
+
 echo "== dex-core capture =="
 echo "output : $OUT_ABS"
 echo "cores  : latency->$LAT_CORE  perf->$PERF_CORE  cross_core->2,3 (self-pinned)"
