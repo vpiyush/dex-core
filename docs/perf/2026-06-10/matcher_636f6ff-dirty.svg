@@ -11,7 +11,7 @@
 
 <g id="gnuplot_canvas">
 
-<rect x="0" y="0" width="1100" height="680" fill="none"/>
+<rect x="0" y="0" width="1100" height="680" fill="#ffffff"/>
 <defs>
 
 	<circle id='gpDot' r='0.5' stroke-width='0.5' stroke='currentColor'/>
@@ -31,7 +31,7 @@
 	<path id='gpPt13' stroke-width='0.242' stroke='currentColor' d='M0,1.330 L1.265,0.411 L0.782,-1.067 L-0.782,-1.076 L-1.265,0.411 z'/>
 	<use xlink:href='#gpPt13' id='gpPt14' fill='currentColor' stroke='none'/>
 	<filter id='textbox' filterUnits='objectBoundingBox' x='0' y='0' height='1' width='1'>
-	  <feFlood flood-color='white' flood-opacity='1' result='bgnd'/>
+	  <feFlood flood-color='#FFFFFF' flood-opacity='1' result='bgnd'/>
 	  <feComposite in='SourceGraphic' in2='bgnd' operator='atop'/>
 	</filter>
 	<filter id='greybox' filterUnits='objectBoundingBox' x='0' y='0' height='1' width='1'>
@@ -39,7 +39,7 @@
 	  <feComposite in='SourceGraphic' in2='grey' operator='atop'/>
 	</filter>
 </defs>
-<g fill="none" color="white" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
+<g fill="none" color="#FFFFFF" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
 </g>
 <g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
 </g>
@@ -269,7 +269,7 @@
 <g fill="none" color="black" stroke="currentColor" stroke-width="1.00" stroke-linecap="butt" stroke-linejoin="miter">
 </g>
 	<g id="gnuplot_plot_1" ><title>restnewlevel</title>
-<g fill="none" color="white" stroke="black" stroke-width="2.00" stroke-linecap="butt" stroke-linejoin="miter">
+<g fill="none" color="#FFFFFF" stroke="black" stroke-width="2.00" stroke-linecap="butt" stroke-linejoin="miter">
 </g>
 <g fill="none" color="black" stroke="currentColor" stroke-width="2.00" stroke-linecap="butt" stroke-linejoin="miter">
 	<g transform="translate(1037.91,61.34)" stroke="none" fill="black" font-family="sans" font-size="11.00"  text-anchor="end">
@@ -527,26 +527,6 @@
 		L643.46,624.64 L654.05,624.37 L660.16,624.33 L669.48,624.21 L674.76,623.92 L683.71,623.82 L694.30,623.60 L702.61,623.55
 		L707.25,623.38 L717.84,623.24 L723.96,623.12 L738.55,623.06 L758.09,623.03 L771.05,623.03 L787.75,623.02 L811.30,622.99
 		L851.55,622.97  '/></g>
-	</g>
-	<g id="gnuplot_plot_16" ><title>realisticworkload</title>
-<g fill="none" color="black" stroke="currentColor" stroke-width="2.00" stroke-linecap="butt" stroke-linejoin="miter">
-	<g transform="translate(1037.91,308.84)" stroke="none" fill="black" font-family="sans" font-size="11.00"  text-anchor="end">
-		<text><tspan font-family="sans" >realistic</tspan><tspan font-family="sans"  font-size="8.8" dy="3.30px">w</tspan><tspan font-family="sans"  font-size="11.0" dy="-3.30px">orkload</tspan></text>
-	</g>
-</g>
-<g fill="none" color="black" stroke="currentColor" stroke-width="2.00" stroke-linecap="butt" stroke-linejoin="miter">
-	<path stroke='rgb(  0,   0,   0)'  d='M1045.60,305.26 L1084.61,305.26 M89.55,627.14 L95.61,627.09 L102.97,627.02 L111.92,627.00 L121.04,626.99 L130.09,626.98
-		L135.86,626.95 L142.76,626.46 L150.77,626.24 L159.58,626.10 L170.20,625.99 L176.50,625.95 L183.47,625.91 L190.92,625.87
-		L200.00,625.83 L210.88,625.78 L216.69,625.76 L224.01,625.73 L231.07,625.70 L240.69,625.67 L250.80,625.64 L257.68,625.62
-		L264.09,625.60 L271.35,625.58 L281.64,625.55 L291.93,625.52 L297.50,625.50 L304.69,625.49 L312.15,625.47 L320.73,625.45
-		L331.66,625.42 L337.66,625.41 L344.18,625.39 L351.90,625.37 L360.82,625.35 L372.32,625.33 L378.31,625.31 L385.10,625.30
-		L392.42,625.28 L401.91,625.26 L412.43,625.23 L418.53,625.22 L425.88,625.20 L432.44,625.18 L442.16,625.15 L452.64,625.12
-		L458.18,625.10 L464.78,625.08 L473.29,625.05 L482.36,625.02 L492.80,624.99 L499.16,624.97 L505.40,624.95 L513.58,624.93
-		L521.81,624.90 L532.69,624.86 L539.41,624.84 L546.25,624.82 L553.15,624.80 L563.77,624.77 L573.55,624.74 L579.40,624.72
-		L585.60,624.69 L593.91,624.67 L602.41,624.63 L612.84,624.59 L619.38,624.56 L626.15,624.55 L634.51,624.51 L642.66,624.44
-		L653.09,624.38 L660.16,624.32 L667.00,624.28 L674.76,623.60 L683.71,622.91 L694.30,622.50 L700.41,622.41 L707.25,622.23
-		L715.01,622.15 L723.96,622.07 L734.55,621.86 L742.86,621.84 L747.50,621.80 L758.09,621.70 L764.21,621.64 L778.80,621.52
-		L787.75,621.43 L798.34,621.39 L811.30,621.32 L828.00,621.29 L851.55,621.15 L891.80,620.80  '/></g>
 	</g>
 <g fill="none" color="black" stroke="currentColor" stroke-width="2.00" stroke-linecap="butt" stroke-linejoin="miter">
 </g>
