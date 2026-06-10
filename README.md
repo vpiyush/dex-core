@@ -1,7 +1,8 @@
-# dex-core
-### A low-latency, deterministic matching engine in Rust.
+<div align="center">
 
-dex-core is the core of a matching engine. It is written from scratch in Rust. It is built with **mechanical sympathy**. It is shaped around the L1 cache and the CPU pipeline. It provides the foundational primitives for a high-throughput exchange.
+# dex-core
+
+### A low-latency, deterministic matching engine in Rust.
 
 ![Rust](https://img.shields.io/badge/Rust-2024-orange?style=flat-square)
 ![concurrency](https://img.shields.io/badge/concurrency-loom--verified-success?style=flat-square)
@@ -10,7 +11,15 @@ dex-core is the core of a matching engine. It is written from scratch in Rust. I
 ![latency](https://img.shields.io/badge/latency-HDR--measured-blueviolet?style=flat-square)
 ![license](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
+**14 ns** publish&nbsp;·&nbsp;**14 ns** poll&nbsp;·&nbsp;**68 ns** core-to-core hop&nbsp;·&nbsp;**0** allocations on the hot path
+
+<sub>p50 on a pinned, isolated core at a measured 4.67 GHz. Full distributions and machine state live in <a href="docs/perf/2026-06-10">docs/perf</a>.</sub>
+
+</div>
+
 ---
+
+dex-core is the core of a matching engine. It is written from scratch in Rust. It is built with **mechanical sympathy**. It is shaped around the L1 cache and the CPU pipeline. It provides the foundational primitives for a high-throughput exchange.
 
 ## 🎯 Why dex-core?
 
@@ -73,17 +82,26 @@ Wall-clock latency is one layer. We also audit the CPU pipeline. One command cap
 ```text
 $ cargo bench-all --crate matcher --intent perfstat
 
-# ── capture pending the tuned-box run; the real counters land here ──
-   task-clock                 …
-   cycles                     …      #   … GHz
-   instructions               …      #   … insn per cycle   (IPC)
-   branches                   …
-   branch-misses              …      #   …% of all branches
-   L1-dcache-loads            …
-   L1-dcache-load-misses      …      #   …% of L1 accesses
+   task-clock                 5,300.96 msec
+   cycles               23,664,289,634      #   4.46 GHz
+   instructions         50,895,148,070      #   2.15 insn per cycle   (IPC)
+   branches              7,906,912,349      #   1.49 G/sec
+   branch-misses            18,798,232      #   0.24% of all branches
+   L1-dcache-loads      13,413,572,644      #   2.53 G/sec
+   L1-dcache-load-misses   265,518,940      #   1.98% of L1 accesses
 ```
 
-We report the raw counters. So you can check the IPC and the cache-miss rate yourself.
+We report the raw counters. So you can check the IPC and the cache-miss rate yourself. The full capture lives in [`docs/perf/2026-06-10`](docs/perf/2026-06-10). It records the kernel, the governor, the effective clock, and every HDR histogram.
+
+### Latency distributions
+
+Every curve is HDR-sampled and corrected for coordinated omission. The x-axis is log-percentile, so the tail stays legible.
+
+| queue ops, single core | cross-core hop, cores 2→3 |
+| :---: | :---: |
+| ![ipc self-latency curve](docs/perf/2026-06-10/ipc_self_latency_636f6ff-dirty.svg) | ![cross-core hop curve](docs/perf/2026-06-10/ipc_cross_core.svg) |
+
+![matcher latency curves](docs/perf/2026-06-10/matcher_636f6ff-dirty.svg)
 
 ---
 
@@ -96,7 +114,7 @@ Here is how the primitives compare to the usual safe-Rust defaults.
 | **Concurrency** | `Mutex<VecDeque<T>>`, `mpsc` | SPMC seqlock (`ipc`) |
 | **Allocation** | `Box<T>`, `Vec<T>` | generational arena, zero on the hot path |
 | **I/O model** | multi-threaded async | async edge, pinned-sync core |
-| **Latency** | microseconds, variable | publish p50 **14 ns**, hop **~50 ns** |
+| **Latency** | microseconds, variable | publish p50 **14 ns**, hop p50 **68 ns** |
 | **Determinism** | race-dependent | single-actor core (bit-identical replay on the roadmap) |
 
 ---
