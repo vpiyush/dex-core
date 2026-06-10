@@ -1,0 +1,9 @@
+    Finished `bench` profile [optimized] target(s) in 0.10s
+     Running benches/cross_core.rs (target/release/deps/cross_core-20b5894ca9a62c11)
+ipc cross-core hop latency — cores 2→3, 1001483 samples (open-loop 1000 ns; assumes invariant cross-core TSC)
+  min         47 ns
+  p50         68 ns
+  p99         96 ns
+  p99.99   34527 ns
+  max      45343 ns
+hdr written: bench-runs/ipc_cross_core.hdr

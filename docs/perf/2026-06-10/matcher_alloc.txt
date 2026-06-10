@@ -1,0 +1,16 @@
+    Finished `release` profile [optimized] target(s) in 0.10s
+     Running `target/release/examples/alloc_proof`
+# Matcher allocation proof (dhat, via benchkit)
+
+| scenario | steps | alloc blocks | alloc bytes | blocks/step |
+|---|--:|--:|--:|--:|
+| A: cancel+reinsert, stable level (HOT PATH) | 500000 | 0 | 0 | 0.0000 |
+| B: cross emptying+recreating level (churn)  | 500000 | 500000 | 16000000 | 1.0000 |
+
+DHAT detail: bench-runs/alloc_proof_dhat-heap.json (view at dh_view.html)
+
+✓ Hot path is zero-allocation (scenario A: 0 blocks across 500000 steps).
+dhat: Total:     37,283,176 bytes in 501,018 blocks
+dhat: At t-gmax: 21,249,160 bytes in 12 blocks
+dhat: At t-end:  1,024 bytes in 1 blocks
+dhat: The data has been saved to bench-runs/alloc_proof_dhat-heap.json, and is viewable with dhat/dh_view.html

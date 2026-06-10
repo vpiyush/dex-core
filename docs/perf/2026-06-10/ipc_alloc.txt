@@ -1,0 +1,15 @@
+    Finished `release` profile [optimized] target(s) in 0.10s
+     Running `target/release/examples/alloc_proof`
+# ipc allocation proof (dhat, via benchkit)
+
+| scenario | steps | alloc blocks | alloc bytes |
+|---|--:|--:|--:|
+| publish + poll (HOT PATH) | 500000 | 0 | 0 |
+
+DHAT detail: bench-runs/ipc_alloc_proof_dhat-heap.json (view at dh_view.html)
+
+✓ Hot path is zero-allocation (0 blocks across 500000 steps).
+dhat: Total:     66,752 bytes in 3 blocks
+dhat: At t-gmax: 66,752 bytes in 3 blocks
+dhat: At t-end:  1,024 bytes in 1 blocks
+dhat: The data has been saved to bench-runs/ipc_alloc_proof_dhat-heap.json, and is viewable with dhat/dh_view.html

@@ -1,0 +1,17 @@
+regime,label,count,min_ns,p50_ns,p99_ns,p99_99_ns,max_ns,msgs_per_sec,ctx_voluntary,ctx_involuntary,minor_faults,major_faults
+back_to_back,rest_new_level,1000000,90,138,1065,2827,189567,5143942,0,0,38647,0
+back_to_back,rest_existing_level,1000000,41,63,180,2335,167423,14307322,0,0,3583,0
+back_to_back,raw_book_insert,1000000,82,127,1052,2867,203391,5443256,0,0,38646,0
+back_to_back,cross_n=1,500000,59,65,86,222,2819,15178229,0,0,0,0
+back_to_back,cross_n=4,500000,163,177,219,1106,3619,5532021,0,0,0,0
+back_to_back,cross_n=16,500000,716,791,922,2219,11239,1252370,0,0,0,0
+back_to_back,fok_success_n=1,500000,61,67,84,112,2675,14708273,0,0,0,0
+back_to_back,fok_success_n=4,500000,171,187,241,363,2929,5206703,0,0,0,0
+back_to_back,fok_success_n=16,500000,756,841,958,2233,2445,1182405,0,0,0,0
+back_to_back,fok_fail_fast,1000000,21,23,24,25,183,43315198,0,0,0,0
+back_to_back,fok_fail_deep,1000000,38,40,46,47,1004,25107845,0,0,0,0
+back_to_back,ioc_no_liquidity,1000000,21,22,36,37,562,45222511,0,0,0,0
+back_to_back,cancel_hit,1000000,137,523,860,1591,27663,1877554,0,0,0,0
+back_to_back,cancel_miss,1000000,23,26,46,167,652,36734764,0,0,0,0
+back_to_back,partial_then_rest,500000,91,107,134,494,1529,9087279,0,0,0,0
+back_to_back,realistic_workload,1000000,22,76,637,919,10055,4523125,0,0,156,0

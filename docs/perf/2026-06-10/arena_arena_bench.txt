@@ -1,0 +1,6 @@
+    Finished `bench` profile [optimized] target(s) in 0.02s
+     Running benches/arena_bench.rs (target/release/deps/arena_bench-0a77b1e9a3fd3e7e)
+benchmark run written:
+  /home/piyush/projects/dex-core/bench-runs/arena_636f6ff-dirty.md
+  /home/piyush/projects/dex-core/bench-runs/arena_636f6ff-dirty.csv
+  /home/piyush/projects/dex-core/bench-runs/arena_636f6ff-dirty_hdr/*.hdr

@@ -1,0 +1,36 @@
+>> building matcher bench (release)…
+>> binary: target/release/deps/matcher_bench-718f4149fede65b9
+>> pinning to core 3
+benchmark run written:
+  /tmp/tmp.WtYqSprBCG/matcher_636f6ff-dirty.md
+  /tmp/tmp.WtYqSprBCG/matcher_636f6ff-dirty.csv
+  /tmp/tmp.WtYqSprBCG/matcher_636f6ff-dirty_hdr/*.hdr
+
+ Performance counter stats for 'env BENCH_OUT_DIR=/tmp/tmp.WtYqSprBCG taskset -c 3 target/release/deps/matcher_bench-718f4149fede65b9':
+
+    5,30,09,59,668      task-clock                       #    0.981 CPUs utilized             
+   23,66,42,89,634      cycles                           #    4.464 GHz                         (35.72%)
+   50,89,51,48,070      instructions                     #    2.15  insn per cycle              (42.88%)
+    7,90,69,12,349      branches                         #    1.492 G/sec                       (50.04%)
+       1,87,98,232      branch-misses                    #    0.24% of all branches             (57.19%)
+      22,22,31,879      cache-references                 #   41.923 M/sec                       (64.34%)
+       9,80,11,749      cache-misses                     #   44.10% of all cache refs           (71.48%)
+   13,41,35,72,644      L1-dcache-loads                  #    2.530 G/sec                       (71.48%)
+      26,55,18,940      L1-dcache-load-misses            #    1.98% of all L1-dcache accesses   (71.48%)
+       2,98,89,222      LLC-loads                        #    5.638 M/sec                       (71.48%)
+       1,22,32,205      LLC-load-misses                  #   40.93% of all LL-cache accesses    (71.46%)
+       3,86,19,123      L1-icache-load-misses                                                   (28.54%)
+   13,42,44,71,247      dTLB-loads                       #    2.532 G/sec                       (28.53%)
+         82,64,866      dTLB-load-misses                 #    0.06% of all dTLB cache accesses  (28.57%)
+          4,15,108      iTLB-load-misses                                                        (28.57%)
+
+       5.403470161 seconds time elapsed
+
+       4.947137000 seconds user
+       0.356194000 seconds sys
+
+
+
+>> done. IPC = instructions/cycles; cache-miss% = cache-misses/cache-references.
+>> Note: this aggregates ALL scenarios in one run — a portfolio-wide average.
+>>       For per-scenario counters, use the iai (cache) regime instead.

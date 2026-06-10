@@ -1,0 +1,6 @@
+    Finished `bench` profile [optimized] target(s) in 0.05s
+     Running benches/orderbook_bench.rs (target/release/deps/orderbook_bench-cfef230b2f63387e)
+benchmark run written:
+  /home/piyush/projects/dex-core/bench-runs/orderbook_636f6ff-dirty.md
+  /home/piyush/projects/dex-core/bench-runs/orderbook_636f6ff-dirty.csv
+  /home/piyush/projects/dex-core/bench-runs/orderbook_636f6ff-dirty_hdr/*.hdr

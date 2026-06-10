@@ -1,0 +1,4 @@
+regime,label,count,min_ns,p50_ns,p99_ns,p99_99_ns,max_ns,msgs_per_sec,ctx_voluntary,ctx_involuntary,minor_faults,major_faults
+back_to_back,publish,1000000,13,14,16,19,399,71581454,0,0,0,0
+back_to_back,poll (hit),1000000,13,14,15,17,276,71933742,0,0,0,0
+back_to_back,poll (miss),1000000,13,14,16,17,338,71591980,0,0,0,0

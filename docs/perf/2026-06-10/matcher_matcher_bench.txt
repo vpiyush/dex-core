@@ -1,0 +1,6 @@
+    Finished `bench` profile [optimized] target(s) in 0.05s
+     Running benches/matcher_bench.rs (target/release/deps/matcher_bench-718f4149fede65b9)
+benchmark run written:
+  /home/piyush/projects/dex-core/bench-runs/matcher_636f6ff-dirty.md
+  /home/piyush/projects/dex-core/bench-runs/matcher_636f6ff-dirty.csv
+  /home/piyush/projects/dex-core/bench-runs/matcher_636f6ff-dirty_hdr/*.hdr

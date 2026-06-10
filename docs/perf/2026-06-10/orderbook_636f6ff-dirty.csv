@@ -1,0 +1,7 @@
+regime,label,count,min_ns,p50_ns,p99_ns,p99_99_ns,max_ns,msgs_per_sec,ctx_voluntary,ctx_involuntary,minor_faults,major_faults
+back_to_back,insert_new_level,1000000,87,144,1069,2723,192255,4983064,0,0,38646,0
+back_to_back,insert_existing_level,1000000,37,70,186,2255,185599,12946295,0,0,3583,0
+back_to_back,pop_top,1000000,39,51,69,176,478,19409695,0,0,23,0
+back_to_back,cancel_oldest,1000000,39,158,379,786,1647,5587838,0,0,0,0
+back_to_back,cancel_random,1000000,128,518,850,1250,2059,1897919,0,0,0,0
+back_to_back,realistic_workload,1000000,39,111,501,774,10319,5970826,0,0,0,0

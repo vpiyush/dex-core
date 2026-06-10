@@ -1,0 +1,6 @@
+    Finished `bench` profile [optimized] target(s) in 0.07s
+     Running benches/self_latency.rs (target/release/deps/self_latency-58f77c91121368a1)
+benchmark run written:
+  /home/piyush/projects/dex-core/bench-runs/ipc_self_latency_636f6ff-dirty.md
+  /home/piyush/projects/dex-core/bench-runs/ipc_self_latency_636f6ff-dirty.csv
+  /home/piyush/projects/dex-core/bench-runs/ipc_self_latency_636f6ff-dirty_hdr/*.hdr
