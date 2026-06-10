@@ -27,10 +27,10 @@ const WARMUP: usize = 1_000;
 const MEASURE: usize = 500_000;
 
 fn main() {
-    std::fs::create_dir_all("bench-runs").ok();
-    let _profiler = dhat::Profiler::builder()
-        .file_name("bench-runs/ipc_alloc_proof_dhat-heap.json")
-        .build();
+    let out = benchkit::out_dir();
+    std::fs::create_dir_all(&out).expect("create out dir");
+    let dhat_json = out.join("ipc_alloc_proof_dhat-heap.json");
+    let _profiler = dhat::Profiler::builder().file_name(&dhat_json).build();
 
     let (q, prod) = Queue::<u64>::new(1024);
     let cons = Queue::subscribe(&q, LapPolicy::SkipToLatest);
@@ -50,6 +50,6 @@ fn main() {
     println!("| scenario | steps | alloc blocks | alloc bytes |");
     println!("|---|--:|--:|--:|");
     println!("| publish + poll (HOT PATH) | {MEASURE} | {} | {} |", delta.blocks, delta.bytes);
-    println!("\nDHAT detail: bench-runs/ipc_alloc_proof_dhat-heap.json (view at dh_view.html)");
+    println!("\nDHAT detail: {} (view at dh_view.html)", dhat_json.display());
     println!("\n✓ Hot path is zero-allocation ({} blocks across {MEASURE} steps).", delta.blocks);
 }

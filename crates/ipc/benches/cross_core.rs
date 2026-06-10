@@ -83,9 +83,13 @@ fn main() {
         });
     });
 
-    std::fs::create_dir_all("bench-runs").ok();
-    let hdr_path = "bench-runs/ipc_cross_core.hdr";
-    std::fs::write(hdr_path, hist.render_hdr_percentiles(5)).expect("write hdr");
+    // benchkit::out_dir resolves BENCH_OUT_DIR / workspace-root bench-runs —
+    // a bare relative path would land in crates/ipc/ (cargo bench sets the
+    // package dir as cwd), invisible next to every other artifact.
+    let out = benchkit::out_dir();
+    std::fs::create_dir_all(&out).expect("create out dir");
+    let hdr_path = out.join("ipc_cross_core.hdr");
+    std::fs::write(&hdr_path, hist.render_hdr_percentiles(5)).expect("write hdr");
 
     println!(
         "ipc cross-core hop latency — cores {PRODUCER_CORE}→{CONSUMER_CORE}, {} samples \
@@ -97,5 +101,5 @@ fn main() {
     println!("  p99     {:>6} ns", hist.p99().as_u64());
     println!("  p99.99  {:>6} ns", hist.p99_99().as_u64());
     println!("  max     {:>6} ns", hist.max().as_u64());
-    eprintln!("hdr written: {hdr_path}");
+    eprintln!("hdr written: {}", hdr_path.display());
 }
