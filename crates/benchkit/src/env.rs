@@ -62,6 +62,21 @@ impl CorePrep {
     }
 }
 
+/// [`RunEnv::run_id`] as a free function, detected fresh — for orchestrators
+/// that need the id BEFORE any bench runs (xtask routes a capture to
+/// `docs/perf/<run_id>/`) and for [`crate::out_dir`]'s default directory.
+pub fn run_id() -> String {
+    compose_run_id(git_short_sha().as_deref(), git_dirty(), &utc_stamp(unix_secs()))
+}
+
+fn compose_run_id(commit: Option<&str>, dirty: bool, fallback: &str) -> String {
+    match (commit, dirty) {
+        (Some(sha), false) => sha.to_string(),
+        (Some(sha), true) => format!("{sha}-dirty"),
+        (None, _) => fallback.to_string(),
+    }
+}
+
 // The warning strings, shared by CorePrep and RunEnv so the texts can't drift.
 
 fn governor_warning(gov: &str) -> String {
@@ -156,15 +171,11 @@ impl RunEnv {
 
     /// Identity for this run's artifacts: the *code* that produced them, not the
     /// time they ran. `<sha>` on a clean tree, `<sha>-dirty` otherwise, and the
-    /// timestamp off-git (so filenames are never empty). Reruns at the same
-    /// clean commit overwrite their artifacts — that is the point: one commit,
-    /// one canonical set of numbers. The header still records the timestamp.
+    /// timestamp off-git (so the id is never empty). Reruns at the same clean
+    /// commit overwrite their artifacts — that is the point: one commit, one
+    /// canonical set of numbers. The header still records the timestamp.
     pub fn run_id(&self) -> String {
-        match (&self.commit, self.dirty) {
-            (Some(sha), false) => sha.clone(),
-            (Some(sha), true) => format!("{sha}-dirty"),
-            (None, _) => self.stamp.clone(),
-        }
+        compose_run_id(self.commit.as_deref(), self.dirty, &self.stamp)
     }
 
     /// Machine-readable warnings: conditions that make a latency run untrustworthy.

@@ -167,27 +167,23 @@ impl<'a> Report<'a> {
         s
     }
 
-    /// Write `<name>_<id>.{md,csv}` and `<name>_<id>_hdr/<scenario>.hdr` into
-    /// [`out_dir`], where `<id>` is [`RunEnv::run_id`] — the git short sha
-    /// (`-dirty` suffixed on a modified tree), falling back to the UTC timestamp
-    /// off-git. The directory is `bench-runs/` at the workspace root by default;
-    /// an orchestrator routes the whole run elsewhere via `BENCH_OUT_DIR`.
+    /// Write `<name>.{md,csv}` and `<name>_hdr/<scenario>.hdr` into
+    /// [`out_dir`]. Filenames are plain: run identity (git sha / `-dirty` /
+    /// timestamp) lives in the directory name, stamped once by `out_dir`'s
+    /// default or by the orchestrator's `BENCH_OUT_DIR`. A rerun at the same id
+    /// overwrites in place — one commit, one canonical set of numbers.
     pub fn write_run(&self, name: &str) -> std::io::Result<RunPaths> {
         let dir = out_dir();
         std::fs::create_dir_all(&dir)?;
         let dir = dir.to_string_lossy();
-        // Artifacts are keyed by the code that produced them (git sha, or the
-        // timestamp off-git), so a rerun at the same clean commit overwrites in
-        // place — one commit, one canonical set of numbers.
-        let id = self.env.run_id();
-        let md = PathBuf::from(format!("{dir}/{name}_{id}.md"));
-        let csv = PathBuf::from(format!("{dir}/{name}_{id}.csv"));
-        let hdr_dir = PathBuf::from(format!("{dir}/{name}_{id}_hdr"));
+        let md = PathBuf::from(format!("{dir}/{name}.md"));
+        let csv = PathBuf::from(format!("{dir}/{name}.csv"));
+        let hdr_dir = PathBuf::from(format!("{dir}/{name}_hdr"));
 
         std::fs::write(&md, self.to_markdown())?;
         std::fs::write(&csv, self.to_csv())?;
-        // Replace the hdr dir wholesale: a stale .hdr from a renamed scenario in
-        // an earlier run at this id must not survive into the new artifact set.
+        // Replace the hdr dir wholesale: a stale .hdr from a renamed scenario
+        // in an earlier run at this same id must not survive into the new set.
         let _ = std::fs::remove_dir_all(&hdr_dir);
         std::fs::create_dir_all(&hdr_dir)?;
         let mut safe_labels = Vec::new();
@@ -202,10 +198,10 @@ impl<'a> Report<'a> {
         // Emit a gnuplot script (a recipe, not an image): a log-percentile
         // latency overlay of every scenario, reading the .hdr files written
         // above. Render with `gnuplot <script>` → the sibling .svg.
-        let gnuplot = PathBuf::from(format!("{dir}/{name}_{id}.gnuplot"));
-        let svg = PathBuf::from(format!("{dir}/{name}_{id}.svg"));
-        let hdr_dirname = format!("{name}_{id}_hdr");
-        let svg_name = format!("{name}_{id}.svg");
+        let gnuplot = PathBuf::from(format!("{dir}/{name}.gnuplot"));
+        let svg = PathBuf::from(format!("{dir}/{name}.svg"));
+        let hdr_dirname = format!("{name}_hdr");
+        let svg_name = format!("{name}.svg");
         std::fs::write(&gnuplot, gnuplot_script(&self.title, &hdr_dirname, &svg_name, &safe_labels))?;
 
         Ok(RunPaths { markdown: md, csv, hdr_dir, gnuplot, svg })
@@ -218,14 +214,14 @@ fn sanitize(label: &str) -> String {
 
 /// A self-contained gnuplot script rendering a log-percentile latency curve
 /// (one line per scenario) to SVG. Paths are RELATIVE to the script's own
-/// directory, so it must be run from `bench-runs/` (the xtask `plots` intent
-/// sets cwd accordingly). X = `1/(1-percentile)` on a log scale, so p99 / p99.99
+/// directory, so it must be run from the run dir that holds it (the xtask
+/// `plots` intent sets cwd accordingly). X = `1/(1-percentile)` on a log scale, so p99 / p99.99
 /// are legible rather than crushed at the right edge — the standard HdrHistogram
 /// plot shape. Column 4 of each `.hdr` is exactly that x value; column 1 is the
 /// latency in ns.
 fn gnuplot_script(title: &str, hdr_dirname: &str, svg_name: &str, labels: &[String]) -> String {
     let mut s = String::new();
-    s.push_str("# benchkit latency curve — render with: gnuplot <this file> (run from bench-runs/)\n");
+    s.push_str("# benchkit latency curve — render with: gnuplot <this file> (run from this dir)\n");
     s.push_str("set terminal svg size 1100,680 font 'sans,11'\n");
     s.push_str(&format!("set output '{svg_name}'\n"));
     s.push_str(&format!("set title \"{} — latency by percentile\"\n", gp_escape(title)));
@@ -261,19 +257,34 @@ fn gp_escape(s: &str) -> String {
 /// The artifact output directory — the single routing point for EVERYTHING a
 /// bench process writes (reports, raw `.hdr` files, dhat json). Resolution, in
 /// priority order: (1) `BENCH_OUT_DIR`, used verbatim — the orchestrator's hook
-/// for aiming a whole run at a capture or scratch dir; (2) else
-/// `<workspace-root>/bench-runs`; (3) else `bench-runs` relative to the cwd.
+/// for aiming a whole run at one directory; (2) else
+/// `<workspace-root>/target/bench-runs/<run_id>`; (3) the same, relative to the
+/// cwd, off a cargo tree.
 ///
-/// (2) matters because cargo gives bench binaries the package dir as cwd but
-/// `cargo run --example` keeps the invoker's cwd — a relative path would land
-/// artifacts in different places depending on how the binary was launched.
+/// Identity lives in the DIRECTORY, never in filenames: every run is its
+/// [`run_id`](crate::run_id) (`<sha>` / `<sha>-dirty` / timestamp off-git), and
+/// a rerun at the same id overwrites in place. Two roots, two lifecycles:
+/// - `target/bench-runs/<run_id>/` — scratch. Every `cargo bench` writes here;
+///   used for iteration and `--compare` baselines; dies with `cargo clean`;
+///   never committed.
+/// - `docs/perf/<run_id>/` — published. Written only when an orchestrator
+///   routes a capture there (`cargo bench-all capture`); committed to git and
+///   quoted by the README.
+///
+/// The workspace-root walk matters because cargo gives bench binaries the
+/// package dir as cwd but `cargo run --example` keeps the invoker's cwd — a
+/// relative path would land artifacts in different places depending on how the
+/// binary was launched.
 pub fn out_dir() -> PathBuf {
     match std::env::var("BENCH_OUT_DIR") {
         Ok(d) => PathBuf::from(d),
-        Err(_) => match workspace_root() {
-            Some(root) => root.join("bench-runs"),
-            None => PathBuf::from("bench-runs"),
-        },
+        Err(_) => {
+            let scratch = format!("target/bench-runs/{}", crate::run_id());
+            match workspace_root() {
+                Some(root) => root.join(scratch),
+                None => PathBuf::from(scratch),
+            }
+        }
     }
 }
 
