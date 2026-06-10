@@ -47,12 +47,23 @@ PERF_ARGS=(
   -d -d
 )
 
-RUNNER=(taskset -c "$CORE" "$BIN")
+# The bench binary writes benchkit report artifacts as a side effect, and they
+# are commit-keyed — left alone they would overwrite the canonical reports from
+# the clean latency pass with perf-instrumented ones. Redirect them to a scratch
+# dir; the counters are this run's product, not the report.
+SCRATCH="$(mktemp -d)"
+trap 'rm -rf "$SCRATCH"' EXIT
+RUNNER=(env BENCH_OUT_DIR="$SCRATCH" taskset -c "$CORE" "$BIN")
 
 PARANOID="$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 99)"
 if [ "$PARANOID" -gt 2 ]; then
   echo ">> perf_event_paranoid=$PARANOID (>2) — using sudo for perf"
   sudo perf stat "${PERF_ARGS[@]}" "${RUNNER[@]}"
+  # Under sudo the bench binary itself ran as root, so the report artifacts it
+  # wrote are root-owned. Hand them back, or every later unprivileged run dies
+  # with PermissionDenied trying to overwrite them (artifacts are commit-keyed,
+  # so reruns hit the same paths).
+  sudo chown -R "$(id -u):$(id -g)" "$ROOT/bench-runs" 2>/dev/null || true
 else
   perf stat "${PERF_ARGS[@]}" "${RUNNER[@]}"
 fi
