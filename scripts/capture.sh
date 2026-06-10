@@ -169,11 +169,11 @@ for c in ipc matcher; do
     | tee "$OUT_ABS/${c}_alloc.txt" || note_fail "alloc $c"
 done
 
-# 5. perf stat: IPC, cache-miss%, branch-miss%.
+# 5. perf stat: IPC, cache-miss%, branch-miss%. xtask owns the binary lookup,
+#    pinning, paranoid check, and the scratch-dir report redirect.
 for c in ipc matcher; do
-  if [ "$c" = ipc ]; then bench=self_latency; else bench="${c}_bench"; fi
-  echo "-> perfstat: $c ($bench, core $PERF_CORE)"
-  bash scripts/perf_bench.sh "$c" "$PERF_CORE" "$bench" 2>&1 \
+  echo "-> perfstat: $c (via cargo bench-all)"
+  cargo bench-all --crate "$c" --intent perfstat 2>&1 \
     | tee "$OUT_ABS/${c}_perfstat.txt" || note_fail "perfstat $c"
 done
 

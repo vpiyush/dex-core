@@ -15,9 +15,9 @@
 //!   cargo bench-all --crate matcher --flamegraph
 //!   cargo bench-all --compare BASE.csv CUR.csv [--noise 5]
 //!
-//! Intents (comma-separated): latency (default), cache, flamegraph.
-//! (alloc/open-loop are in-process regimes a bench opts into in code; this
-//! runner orchestrates the out-of-process regimes that need extra tooling.)
+//! Intents (comma-separated): latency (default), cache, alloc, perfstat,
+//! plots, flamegraph. (open-loop is an in-process regime a bench opts into in
+//! code; this runner orchestrates the passes that need extra tooling.)
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -48,6 +48,9 @@ fn bench_crate_list() -> String {
 const IAI_CRATES: &[&str] = &["matcher"];
 /// Crates that ship a dhat `alloc_proof` example.
 const ALLOC_CRATES: &[&str] = &["matcher", "ipc"];
+/// Core the perfstat regime pins to — paired with the latency core (2) on this
+/// box; both are isolcpus'd so the counters see only the bench.
+const PERF_CORE: &str = "3";
 
 fn main() {
     // The `cargo bench-all -- <args>` alias already strips one `--`, but if the
@@ -179,21 +182,87 @@ fn run_alloc(krate: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// CPU-internals (`perf stat`: IPC, cache-miss%, branch-mispredict%) via
-/// scripts/perf_bench.sh. The script handles the build, taskset pinning, and
-/// sudo-if-paranoid.
+/// CPU-internals (`perf stat`: IPC, cache-miss%, branch-mispredict%) of a
+/// crate's latency bench, pinned to one core (taskset) so counters aren't
+/// smeared across migrations — the same hygiene as a latency run.
 fn run_perfstat(krate: &str) -> Result<(), String> {
     let bench = latency_bench(krate)
         .ok_or_else(|| format!("[{krate}] no latency bench registered in BENCH_CRATES"))?;
-    eprintln!("→ [{krate}] perfstat: scripts/perf_bench.sh {krate} 3 {bench}");
-    let status = Command::new("scripts/perf_bench.sh")
-        .args([krate, "3", bench])
-        .status()
-        .map_err(|e| format!("failed to spawn scripts/perf_bench.sh: {e}"))?;
-    if !status.success() {
-        return Err(format!("[{krate}] perf_bench.sh failed (exit {:?})", status.code()));
+
+    // Refuse rather than escalate when the kernel blocks unprivileged counters:
+    // a sudo'd bench writes root-owned, commit-keyed artifacts that every later
+    // unprivileged run dies trying to overwrite.
+    let paranoid = std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    if paranoid > 2 {
+        return Err(format!(
+            "kernel.perf_event_paranoid={paranoid} (>2) blocks unprivileged perf counters.\n\
+             fix now:  sudo sysctl kernel.perf_event_paranoid=1\n\
+             persist:  echo 'kernel.perf_event_paranoid = 1' | sudo tee /etc/sysctl.d/99-perf.conf"
+        ));
     }
+
+    let bin = build_bench_binary(krate, bench)?;
+
+    // The bench writes its benchkit report as a side effect, and artifacts are
+    // commit-keyed — left alone, this perf-instrumented run would overwrite the
+    // canonical reports from the clean latency pass. Route them to a scratch
+    // dir; the counters are this run's product, not the report.
+    let scratch = std::env::temp_dir().join(format!("benchkit_perfstat_{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).map_err(|e| format!("create scratch dir: {e}"))?;
+
+    eprintln!("→ [{krate}] perfstat: perf stat … -- taskset -c {PERF_CORE} {bin}");
+    // -d -d = detailed: adds L1/LLC loads+misses on top of the explicit set.
+    let status = Command::new("perf")
+        .args([
+            "stat",
+            "-e", "task-clock,cycles,instructions,branches,branch-misses",
+            "-e", "cache-references,cache-misses",
+            "-d", "-d",
+            "--",
+            "taskset", "-c", PERF_CORE, &bin,
+        ])
+        .env("BENCH_OUT_DIR", &scratch)
+        .status();
+    let _ = std::fs::remove_dir_all(&scratch);
+    let status = status.map_err(|e| format!("failed to spawn perf: {e}"))?;
+    if !status.success() {
+        return Err(format!("[{krate}] perf stat failed (exit {:?})", status.code()));
+    }
+    eprintln!("  IPC = instructions/cycles; cache-miss% = cache-misses/cache-references.");
+    eprintln!("  note: counters aggregate ALL scenarios (a portfolio-wide average); per-scenario counts come from the iai cache regime.");
     Ok(())
+}
+
+/// Build a bench target (`cargo bench --no-run`) and return its executable
+/// path, parsed from cargo's JSON messages — exact, instead of globbing
+/// `target/release/deps` and hoping the newest hash is the right one. Build
+/// progress stays visible on stderr; only the JSON stream is captured.
+fn build_bench_binary(krate: &str, bench: &str) -> Result<String, String> {
+    let out = Command::new("cargo")
+        .args(["bench", "-p", krate, "--bench", bench, "--no-run", "--message-format=json"])
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .map_err(|e| format!("failed to spawn cargo: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("[{krate}] bench build for `{bench}` failed"));
+    }
+    // One JSON object per line; only runnable artifacts carry a quoted
+    // "executable" (libs and build scripts report null). The bench target
+    // builds last, so the last match wins.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut exe = None;
+    for line in stdout.lines() {
+        if let Some(i) = line.find("\"executable\":\"") {
+            let rest = &line[i + "\"executable\":\"".len()..];
+            if let Some(j) = rest.find('"') {
+                exe = Some(rest[..j].to_string());
+            }
+        }
+    }
+    exe.ok_or_else(|| format!("[{krate}] no executable in cargo's JSON output for `{bench}`"))
 }
 
 /// Render the latency-curve SVG by running gnuplot on the most recent
