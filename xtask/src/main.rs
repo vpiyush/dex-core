@@ -146,7 +146,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
     }
 
-    eprintln!("\n\x1b[32m✓ done.\x1b[0m reports under bench-runs/ at the workspace root.");
+    eprintln!("\n\x1b[32m✓ done.\x1b[0m reports under {}", benchkit::out_dir().display());
     Ok(())
 }
 
@@ -194,8 +194,8 @@ fn run_alloc(krate: &str) -> Result<(), String> {
 }
 
 /// Refuse rather than escalate when the kernel blocks unprivileged counters:
-/// a sudo'd bench writes root-owned, commit-keyed artifacts that every later
-/// unprivileged run dies trying to overwrite.
+/// a sudo'd bench writes root-owned artifacts at run-id paths that every later
+/// unprivileged rerun dies trying to overwrite.
 fn check_paranoid() -> Result<(), String> {
     let paranoid = std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid")
         .ok()
@@ -221,8 +221,8 @@ fn run_perfstat(krate: &str, tee: Option<&Path>) -> Result<(), String> {
     check_paranoid()?;
     let bin = build_bench_binary(krate, bench)?;
 
-    // The bench writes its benchkit report as a side effect, and artifacts are
-    // commit-keyed — left alone, this perf-instrumented run would overwrite the
+    // The bench writes its benchkit report as a side effect, into this run id's
+    // directory — left alone, this perf-instrumented run would overwrite the
     // canonical reports from the clean latency pass. Route them to a scratch
     // dir; the counters are this run's product, not the report.
     let scratch = std::env::temp_dir().join(format!("benchkit_perfstat_{}", std::process::id()));
@@ -315,29 +315,40 @@ fn tee_run(mut cmd: Command, txt: &Path) -> Result<(), String> {
     if status.success() { Ok(()) } else { Err(format!("exit {:?}", status.code())) }
 }
 
-/// Render the latency-curve SVG by running gnuplot on the most recent
-/// `<crate>_*.gnuplot` script in bench-runs/ (emitted by a latency run). The
-/// script's paths are relative to bench-runs/, so we run gnuplot with that cwd.
+/// Render the latency-curve SVG by running gnuplot on the crate's `.gnuplot`
+/// script in the CURRENT run's directory (`target/bench-runs/<run_id>/`, via
+/// benchkit::out_dir). The script's paths are relative to that dir, so gnuplot
+/// runs with it as cwd.
 fn run_plots(krate: &str) -> Result<(), String> {
-    let bench_runs = workspace_path("bench-runs");
-    let script = latest_file(&bench_runs, krate, ".gnuplot").ok_or_else(|| {
-        format!(
-            "no {krate}_*.gnuplot found in bench-runs/ — run a latency pass first \
-             (`cargo bench-all --crate {krate}` writes the gnuplot script)."
-        )
-    })?;
-    let script_name = script.file_name().unwrap().to_string_lossy().into_owned();
-    eprintln!("→ [{krate}] plots: gnuplot {script_name}  (cwd bench-runs/)");
+    let dir = benchkit::out_dir();
+    // The script is `<report name>.gnuplot`; report names are the crate name or
+    // prefixed by it (ipc's latency report is `ipc_self_latency`).
+    let script_name = std::fs::read_dir(&dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|n| {
+            n.ends_with(".gnuplot") && (n == &format!("{krate}.gnuplot") || n.starts_with(&format!("{krate}_")))
+        })
+        .ok_or_else(|| {
+            format!(
+                "no gnuplot script for `{krate}` in {} — run a latency pass at this commit first \
+                 (`cargo bench-all --crate {krate}`).",
+                dir.display()
+            )
+        })?;
+    eprintln!("→ [{krate}] plots: gnuplot {script_name}  (cwd {})", dir.display());
     let status = Command::new("gnuplot")
         .arg(&script_name)
-        .current_dir(&bench_runs)
+        .current_dir(&dir)
         .status()
         .map_err(|e| format!("failed to spawn gnuplot: {e}"))?;
     if !status.success() {
         return Err(format!("[{krate}] gnuplot failed (exit {:?})", status.code()));
     }
-    let svg = script_name.replace(".gnuplot", ".svg");
-    eprintln!("  wrote bench-runs/{svg}");
+    eprintln!("  wrote {}/{}", dir.display(), script_name.replace(".gnuplot", ".svg"));
     Ok(())
 }
 
@@ -390,7 +401,7 @@ fn cargo_bench(krate: &str, bench: &str, extra: &[&str]) -> Result<(), String> {
 /// One-shot canonical performance capture: everything the README and per-crate
 /// docs quote — latency reports + curves, the cross-core hop, callgrind counts,
 /// alloc proofs, perf counters, provenance — written DIRECTLY into one
-/// directory (default `docs/perf/<today>`) by routing every child's
+/// directory (default `docs/perf/<run_id>`) by routing every child's
 /// `BENCH_OUT_DIR` there. No post-hoc artifact gathering, so two runs can
 /// never mix.
 ///
@@ -422,9 +433,12 @@ fn run_capture(rest: &[String]) -> Result<(), String> {
             other => return Err(format!("unknown capture argument `{other}` (only --out <dir>)")),
         }
     }
+    // Published captures are keyed like every run: by what produced them.
+    // `docs/perf/<run_id>/` — a new commit gets a new directory, so a capture
+    // can never damage a previously published one.
     let dir = match out {
         Some(d) => std::path::PathBuf::from(d),
-        None => workspace_path(&format!("docs/perf/{}", today())),
+        None => workspace_path(&format!("docs/perf/{}", benchkit::run_id())),
     };
 
     // Verify-before-claim, capture edition: a canonical capture with silently
@@ -438,9 +452,9 @@ fn run_capture(rest: &[String]) -> Result<(), String> {
     }
     check_paranoid()?;
 
-    // The capture dir is the canonical record of ONE run. Artifacts are
-    // commit-keyed, so a rerun after a commit would write new names next to
-    // the old ones and the dir becomes a mix of two runs. Start from empty.
+    // The capture dir is the canonical record of ONE run at one run id. A
+    // rerun at the same id must not inherit artifacts from renamed scenarios
+    // or passes of an earlier attempt. Start from empty.
     if dir.exists() && std::fs::read_dir(&dir).map(|mut d| d.next().is_some()).unwrap_or(false) {
         eprintln!("-> {} is not empty; clearing the previous capture so runs don't mix", dir.display());
         std::fs::remove_dir_all(&dir).map_err(|e| format!("clear {}: {e}", dir.display()))?;
@@ -501,7 +515,7 @@ fn run_capture(rest: &[String]) -> Result<(), String> {
     eprintln!();
     if fails.is_empty() {
         eprintln!("\x1b[32m✓ capture complete.\x1b[0m artifacts in: {}", dir.display());
-        eprintln!("  *.md / *.csv / *_hdr/   benchkit reports (commit-keyed) + raw distributions");
+        eprintln!("  *.md / *.csv / *_hdr/   benchkit reports + raw distributions");
         eprintln!("  *.txt                   pass output (percentiles, counters, proofs)");
         eprintln!("  *.svg                   latency-curve plots");
         eprintln!("  ENVIRONMENT.txt         host, kernel, cores, effective clock");
@@ -673,10 +687,6 @@ fn effective_clock_ghz(core: &str) -> Option<f64> {
         .map(|cycles| cycles / 1e9)
 }
 
-fn today() -> String {
-    shell_line("date", &["+%F"])
-}
-
 /// One-line stdout of a command; "?" on any failure.
 fn shell_line(cmd: &str, args: &[&str]) -> String {
     Command::new(cmd)
@@ -805,25 +815,6 @@ fn workspace_path(rel: &str) -> std::path::PathBuf {
     }
 }
 
-/// Most recently modified file in `dir` whose name starts with `prefix_` and
-/// ends with `suffix`.
-fn latest_file(dir: &Path, prefix: &str, suffix: &str) -> Option<std::path::PathBuf> {
-    let pre = format!("{prefix}_");
-    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !(name.starts_with(&pre) && name.ends_with(suffix)) {
-            continue;
-        }
-        if let Ok(mtime) = entry.metadata().and_then(|m| m.modified())
-            && best.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true)
-        {
-            best = Some((mtime, entry.path()));
-        }
-    }
-    best.map(|(_, p)| p)
-}
-
 fn tool_present(tool: &str) -> bool {
     // `which`-style check via PATH; works for binaries and PATH-listed scripts.
     Command::new("sh")
@@ -841,7 +832,7 @@ fn print_help() {
          cargo bench-all [--crate <name> | --all-crates] [--intent <list>] [--flamegraph]\n  \
          cargo bench-all --compare <baseline.csv> <current.csv> [--noise <pct>]\n  \
          cargo bench-all capture [--out <dir>]    one-shot canonical capture into\n                                           \
-         docs/perf/<today> (prep notes: see run_capture's doc comment)\n\n\
+         docs/perf/<run-id> (prep notes: see run_capture's doc comment)\n\n\
          INTENTS (comma-separated, default `latency`):\n  \
          latency     rdtscp wall-clock latency (zero extra deps)\n  \
          cache       callgrind instruction/cache counts (needs valgrind; iai crates only)\n  \
@@ -853,7 +844,7 @@ fn print_help() {
          EXAMPLES:\n  \
          cargo bench-all\n  \
          cargo bench-all --crate matcher --intent latency,cache\n  \
-         cargo bench-all --compare bench-runs/matcher_OLD.csv bench-runs/matcher_NEW.csv",
+         cargo bench-all --compare target/bench-runs/<shaA>/matcher.csv target/bench-runs/<shaB>/matcher.csv",
         bench_crate_list()
     );
 }
