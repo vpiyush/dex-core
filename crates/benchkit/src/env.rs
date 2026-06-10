@@ -16,6 +16,72 @@ pub enum Turbo {
     Unknown,
 }
 
+/// Prep state of ONE core — the same per-core checks [`RunEnv`] applies to its
+/// own pinned core, exposed separately so an orchestrator can inspect the bench
+/// cores BEFORE spawning pinned children (xtask's capture mode). Detection and
+/// warning text live here once; `RunEnv` delegates.
+#[derive(Clone, Debug)]
+pub struct CorePrep {
+    pub core: u32,
+    pub governor: String,
+    pub clock_min_khz: Option<u64>,
+    pub clock_max_khz: Option<u64>,
+    pub smt_siblings_online: Vec<u32>,
+}
+
+impl CorePrep {
+    pub fn detect(core: u32) -> Self {
+        CorePrep {
+            core,
+            governor: read_trim(&format!(
+                "/sys/devices/system/cpu/cpu{core}/cpufreq/scaling_governor"
+            ))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".into()),
+            clock_min_khz: read_khz(core, "scaling_min_freq"),
+            clock_max_khz: read_khz(core, "scaling_max_freq"),
+            smt_siblings_online: online_siblings(core),
+        }
+    }
+
+    /// Conditions that make a latency run on this core untrustworthy.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut w = Vec::new();
+        if self.governor != "performance" && self.governor != "unknown" {
+            w.push(governor_warning(&self.governor));
+        }
+        if let (Some(min), Some(max)) = (self.clock_min_khz, self.clock_max_khz)
+            && min != max
+        {
+            w.push(clock_warning(self.core, min, max));
+        }
+        if !self.smt_siblings_online.is_empty() {
+            w.push(smt_warning(self.core, &self.smt_siblings_online));
+        }
+        w
+    }
+}
+
+// The warning strings, shared by CorePrep and RunEnv so the texts can't drift.
+
+fn governor_warning(gov: &str) -> String {
+    format!("governor `{gov}` (not `performance`): clock may scale during the run")
+}
+
+fn clock_warning(core: u32, min: u64, max: u64) -> String {
+    format!(
+        "clock not pinned on cpu{core} (scaling min={min} max={max} kHz): the rate can move mid-run — pin it: sudo cpupower -c {core} frequency-set -d <khz> -u <khz>"
+    )
+}
+
+fn smt_warning(core: u32, sibs: &[u32]) -> String {
+    let sibs: Vec<String> = sibs.iter().map(|c| format!("cpu{c}")).collect();
+    format!(
+        "SMT sibling {} of bench cpu{core} is online: an OS thread there shares the physical core's pipelines and caches and pollutes tails — offline it: echo 0 | sudo tee /sys/devices/system/cpu/cpu<N>/online",
+        sibs.join(", ")
+    )
+}
+
 /// Snapshot of machine + process state for one benchmark run.
 #[derive(Clone, Debug)]
 pub struct RunEnv {
@@ -50,18 +116,19 @@ impl RunEnv {
         let bench_core = if pinned { affinity.parse::<u32>().ok() } else { None };
         // Read per-cpu state from the BENCH core when pinned — cpu0's governor
         // or clock limits say nothing about the core the run executes on.
-        let probe = bench_core.unwrap_or(0);
-        let (clock_min_khz, clock_max_khz) = match bench_core {
-            Some(c) => (read_khz(c, "scaling_min_freq"), read_khz(c, "scaling_max_freq")),
-            None => (None, None),
+        let prep = bench_core.map(CorePrep::detect);
+        let (clock_min_khz, clock_max_khz, smt_siblings_online) = match &prep {
+            Some(p) => (p.clock_min_khz, p.clock_max_khz, p.smt_siblings_online.clone()),
+            None => (None, None, Vec::new()),
         };
         RunEnv {
             cpu_model: cpu_model(),
-            governor: read_trim(&format!(
-                "/sys/devices/system/cpu/cpu{probe}/cpufreq/scaling_governor"
-            ))
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "unknown".into()),
+            governor: match &prep {
+                Some(p) => p.governor.clone(),
+                None => read_trim("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "unknown".into()),
+            },
             turbo: read_turbo(),
             isolated: read_trim("/sys/devices/system/cpu/isolated")
                 .filter(|s| !s.is_empty())
@@ -83,7 +150,7 @@ impl RunEnv {
             bench_core,
             clock_min_khz,
             clock_max_khz,
-            smt_siblings_online: bench_core.map(online_siblings).unwrap_or_default(),
+            smt_siblings_online,
         }
     }
 
@@ -111,26 +178,16 @@ impl RunEnv {
             ));
         }
         if self.governor != "performance" && self.governor != "unknown" {
-            w.push(format!(
-                "governor `{}` (not `performance`): clock may scale during the run",
-                self.governor
-            ));
+            w.push(governor_warning(&self.governor));
         }
         let core = self.bench_core.unwrap_or(0);
         if let (Some(min), Some(max)) = (self.clock_min_khz, self.clock_max_khz)
             && min != max
         {
-            w.push(format!(
-                "clock not pinned on cpu{core} (scaling min={min} max={max} kHz): the rate can move mid-run — pin it: sudo cpupower -c {core} frequency-set -d <khz> -u <khz>"
-            ));
+            w.push(clock_warning(core, min, max));
         }
         if !self.smt_siblings_online.is_empty() {
-            let sibs: Vec<String> =
-                self.smt_siblings_online.iter().map(|c| format!("cpu{c}")).collect();
-            w.push(format!(
-                "SMT sibling {} of bench cpu{core} is online: an OS thread there shares the physical core's pipelines and caches and pollutes tails — offline it: echo 0 | sudo tee /sys/devices/system/cpu/cpu<N>/online",
-                sibs.join(", ")
-            ));
+            w.push(smt_warning(core, &self.smt_siblings_online));
         }
         w
     }
@@ -390,6 +447,26 @@ mod tests {
         assert_eq!(parse_cpu_list("3"), vec![3]);
         assert_eq!(parse_cpu_list(""), Vec::<u32>::new());
         assert_eq!(parse_cpu_list("junk"), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn core_prep_warnings_cover_all_three_checks() {
+        let mut p = CorePrep {
+            core: 2,
+            governor: "performance".into(),
+            clock_min_khz: Some(4_700_000),
+            clock_max_khz: Some(4_700_000),
+            smt_siblings_online: Vec::new(),
+        };
+        assert!(p.warnings().is_empty(), "clean prep produces no warnings");
+        p.governor = "powersave".into();
+        p.clock_min_khz = Some(400_000);
+        p.smt_siblings_online = vec![6];
+        let w = p.warnings();
+        assert_eq!(w.len(), 3);
+        assert!(w[0].contains("governor `powersave`"));
+        assert!(w[1].contains("clock not pinned on cpu2"));
+        assert!(w[2].contains("SMT sibling cpu6"));
     }
 
     #[test]

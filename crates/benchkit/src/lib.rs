@@ -29,7 +29,7 @@ mod suite;
 #[cfg(feature = "alloc")]
 mod alloc;
 
-pub use env::{RunEnv, Turbo};
+pub use env::{CorePrep, RunEnv, Turbo};
 pub use iters::Iters;
 pub use lcg::Lcg;
 pub use report::{Comparison, Delta, Report, RunPaths, Verdict, out_dir};
