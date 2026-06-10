@@ -33,6 +33,12 @@ pub struct RunEnv {
     pub rustc: String,          // compiler that built this binary (from build.rs)
     pub rustflags: String,      // flags cargo passed it; "" when none
     pub profile: String,        // "release"/"debug", from debug_assertions
+    // Bench-core prep state, detected ONLY when pinned (when unpinned the
+    // not-pinned warning already condemns the run; cpu0's state would be noise).
+    pub bench_core: Option<u32>,       // the core `affinity` names
+    pub clock_min_khz: Option<u64>,    // scaling_min_freq of that core
+    pub clock_max_khz: Option<u64>,    // scaling_max_freq of that core
+    pub smt_siblings_online: Vec<u32>, // ONLINE hyperthread siblings of that core
 }
 
 impl RunEnv {
@@ -41,11 +47,21 @@ impl RunEnv {
         let unix_secs = unix_secs();
         let affinity = read_affinity();
         let pinned = is_single_core(&affinity);
+        let bench_core = if pinned { affinity.parse::<u32>().ok() } else { None };
+        // Read per-cpu state from the BENCH core when pinned — cpu0's governor
+        // or clock limits say nothing about the core the run executes on.
+        let probe = bench_core.unwrap_or(0);
+        let (clock_min_khz, clock_max_khz) = match bench_core {
+            Some(c) => (read_khz(c, "scaling_min_freq"), read_khz(c, "scaling_max_freq")),
+            None => (None, None),
+        };
         RunEnv {
             cpu_model: cpu_model(),
-            governor: read_trim("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "unknown".into()),
+            governor: read_trim(&format!(
+                "/sys/devices/system/cpu/cpu{probe}/cpufreq/scaling_governor"
+            ))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".into()),
             turbo: read_turbo(),
             isolated: read_trim("/sys/devices/system/cpu/isolated")
                 .filter(|s| !s.is_empty())
@@ -64,6 +80,10 @@ impl RunEnv {
             // debug_assertions tracks the profile family this code was compiled
             // under: off for release/bench, on for dev/test.
             profile: if cfg!(debug_assertions) { "debug" } else { "release" }.to_string(),
+            bench_core,
+            clock_min_khz,
+            clock_max_khz,
+            smt_siblings_online: bench_core.map(online_siblings).unwrap_or_default(),
         }
     }
 
@@ -94,6 +114,22 @@ impl RunEnv {
             w.push(format!(
                 "governor `{}` (not `performance`): clock may scale during the run",
                 self.governor
+            ));
+        }
+        let core = self.bench_core.unwrap_or(0);
+        if let (Some(min), Some(max)) = (self.clock_min_khz, self.clock_max_khz)
+            && min != max
+        {
+            w.push(format!(
+                "clock not pinned on cpu{core} (scaling min={min} max={max} kHz): the rate can move mid-run — pin it: sudo cpupower -c {core} frequency-set -d <khz> -u <khz>"
+            ));
+        }
+        if !self.smt_siblings_online.is_empty() {
+            let sibs: Vec<String> =
+                self.smt_siblings_online.iter().map(|c| format!("cpu{c}")).collect();
+            w.push(format!(
+                "SMT sibling {} of bench cpu{core} is online: an OS thread there shares the physical core's pipelines and caches and pollutes tails — offline it: echo 0 | sudo tee /sys/devices/system/cpu/cpu<N>/online",
+                sibs.join(", ")
             ));
         }
         w
@@ -130,6 +166,15 @@ impl RunEnv {
             self.affinity,
             if self.pinned { "(pinned ✓)" } else { "(NOT pinned ⚠)" }
         );
+        if let (Some(core), Some(min), Some(max)) =
+            (self.bench_core, self.clock_min_khz, self.clock_max_khz)
+        {
+            let _ = writeln!(
+                s,
+                "- clock: cpu{core} scaling min={min} max={max} kHz {}",
+                if min == max { "(pinned ✓)" } else { "(NOT pinned ⚠)" }
+            );
+        }
         let _ = writeln!(s, "- TSC rate ~{:.2} GHz", self.tsc_ghz);
         let _ = writeln!(s, "- scope: {scope}");
         let _ = writeln!(
@@ -166,6 +211,53 @@ fn read_turbo() -> Turbo {
         Some("0") => Turbo::On,
         _ => Turbo::Unknown,
     }
+}
+
+/// A cpufreq value (kHz) for one core, e.g. `scaling_min_freq`.
+fn read_khz(core: u32, file: &str) -> Option<u64> {
+    read_trim(&format!("/sys/devices/system/cpu/cpu{core}/cpufreq/{file}"))
+        .and_then(|s| s.parse().ok())
+}
+
+/// Online SMT siblings of `core` — the hyperthreads sharing its physical core.
+/// Empty when topology is unreadable (off-Linux) or all siblings are offline.
+fn online_siblings(core: u32) -> Vec<u32> {
+    let Some(list) = read_trim(&format!(
+        "/sys/devices/system/cpu/cpu{core}/topology/thread_siblings_list"
+    )) else {
+        return Vec::new();
+    };
+    parse_cpu_list(&list)
+        .into_iter()
+        .filter(|&sib| sib != core)
+        .filter(|&sib| {
+            // A missing `online` file means the cpu is not hot-pluggable
+            // (cpu0): it cannot be offlined, so it IS online.
+            read_trim(&format!("/sys/devices/system/cpu/cpu{sib}/online"))
+                .map(|v| v == "1")
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
+/// Parse a sysfs cpu list ("2,6", "0-3", "0-1,4") into core ids.
+fn parse_cpu_list(s: &str) -> Vec<u32> {
+    let mut out = Vec::new();
+    for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        match part.split_once('-') {
+            Some((a, b)) => {
+                if let (Ok(a), Ok(b)) = (a.parse::<u32>(), b.parse::<u32>()) {
+                    out.extend(a..=b);
+                }
+            }
+            None => {
+                if let Ok(v) = part.parse::<u32>() {
+                    out.push(v);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Short sha of HEAD, captured at run time by shelling out to `git`. `None` when
@@ -288,6 +380,49 @@ mod tests {
         assert!(!env.rustc.is_empty());
         assert_eq!(env.profile, "debug");
         assert!(h.contains("- build:"));
+    }
+
+    #[test]
+    fn cpu_list_parsing() {
+        assert_eq!(parse_cpu_list("2,6"), vec![2, 6]);
+        assert_eq!(parse_cpu_list("0-3"), vec![0, 1, 2, 3]);
+        assert_eq!(parse_cpu_list("0-1,4"), vec![0, 1, 4]);
+        assert_eq!(parse_cpu_list("3"), vec![3]);
+        assert_eq!(parse_cpu_list(""), Vec::<u32>::new());
+        assert_eq!(parse_cpu_list("junk"), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn warnings_flag_unpinned_clock_and_online_siblings() {
+        let cal = telemetry::primitives::calibrate();
+        let mut env = RunEnv::detect(&cal);
+        // Force a clean prep baseline, then break one condition at a time.
+        env.affinity = "2".into();
+        env.pinned = true;
+        env.governor = "performance".into();
+        env.bench_core = Some(2);
+        env.clock_min_khz = Some(4_700_000);
+        env.clock_max_khz = Some(4_700_000);
+        env.smt_siblings_online = Vec::new();
+        assert!(env.warnings().is_empty(), "clean prep produces no warnings");
+
+        env.clock_min_khz = Some(1_200_000);
+        let w = env.warnings();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("clock not pinned on cpu2"));
+        assert!(w[0].contains("min=1200000 max=4700000"));
+        env.clock_min_khz = Some(4_700_000);
+
+        env.smt_siblings_online = vec![6];
+        let w = env.warnings();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("SMT sibling cpu6"));
+        assert!(w[0].contains("bench cpu2"));
+
+        // The header stamps the clock policy and surfaces the warning lines.
+        let h = env.header("t", "s");
+        assert!(h.contains("- clock: cpu2 scaling min=4700000 max=4700000 kHz (pinned ✓)"));
+        assert!(h.contains("⚠ SMT sibling cpu6"));
     }
 
     #[test]
