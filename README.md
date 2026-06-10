@@ -2,7 +2,7 @@
 
 # dex-core
 
-### A low-latency, deterministic matching engine in Rust.
+### A full exchange stack in Rust: deterministic matching core, lock-free IPC backplane, async network edge.
 
 ![Rust](https://img.shields.io/badge/Rust-2024-orange?style=flat-square)
 ![concurrency](https://img.shields.io/badge/concurrency-loom--verified-success?style=flat-square)
@@ -11,19 +11,20 @@
 ![latency](https://img.shields.io/badge/latency-HDR--measured-blueviolet?style=flat-square)
 ![license](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
-**14 ns** publish&nbsp;·&nbsp;**14 ns** poll&nbsp;·&nbsp;**68 ns** core-to-core hop&nbsp;·&nbsp;**0** allocations on the hot path
+**4.5M orders/s** on one core at **p99.99 < 1 µs**&nbsp;·&nbsp;**65 ns** to match an order&nbsp;·&nbsp;**0** allocations on the hot path
 
-<sub>p50 on a pinned, isolated core at a measured 4.67 GHz. Full distributions and machine state live in <a href="docs/perf/2026-06-10">docs/perf</a>.</sub>
+<sub>Realistic mixed workload, engine-internal, on a pinned isolated core at a measured 4.67 GHz. Latencies are medians unless a percentile is named; throughput is derived from mean service time. Full distributions and machine state live in <a href="docs/perf/2026-06-10">docs/perf</a>.</sub>
 
 </div>
 
 ---
 
-dex-core is the core of a matching engine. It is written from scratch in Rust. It is built with **mechanical sympathy**. It is shaped around the L1 cache and the CPU pipeline. It provides the foundational primitives for a high-throughput exchange.
+dex-core is a full exchange, written from scratch in Rust. The execution core is built and measured: lock-free IPC backplane, arena storage, order book, price-time matcher, and the measurement layer that proves the numbers. The network edge is in flight and persistence is next (see the [roadmap](#-8-roadmap)). Every layer is built with **mechanical sympathy**: shaped around the L1 cache and the CPU pipeline.
 
 ## 🎯 Why dex-core?
 
 * **Mechanical sympathy.** It is built for the L1 cache and the CPU pipeline.
+* **Actor model, zero sharing.** Each pinned core runs one single-threaded actor that owns its state outright. Actors talk only through the lock-free queues. There is no mutex to contend on, and determinism falls out of the design.
 * **Verified concurrency.** The lock-free queue is loom model-checked, Miri-clean, and stress-tested for torn reads.
 * **Honest tails.** Every latency is an HDR distribution. It is corrected for coordinated omission. It ships with the machine it ran on and the command to repeat it.
 * **Lock-free IPC.** It is a custom SPMC seqlock backplane. There are no mutexes and no kernel-space syncing on the hot path.
@@ -32,7 +33,7 @@ dex-core is the core of a matching engine. It is written from scratch in Rust. I
 
 ## 🧱 1. The big picture: tiered architecture
 
-dex-core isolates the chaos of network I/O from the strict timing of the matching core. Async lives only at the edge. It sits on the far side of a queue. The core is pinned, synchronous, and busy-polling.
+dex-core isolates the chaos of network I/O from the strict timing of the matching core. Async lives only at the edge. It sits on the far side of a queue. The core is a set of pinned, single-threaded actors: synchronous, busy-polling, each owning its state outright.
 
 ```mermaid
 graph TD
@@ -64,18 +65,39 @@ graph TD
 
 ## 🏛 2. Technical pillars
 
-### I. Cache-line discipline (`ipc`)
+### I. The deterministic core (`matcher` + `orderbook`)
+Price-time priority: a `BTreeMap` of price levels, a FIFO `VecDeque` per level, arena-backed order storage. Limit, IOC, and FOK time-in-force semantics, with FOK as a pre-checked gate: a failed FOK rejects in 23 ns and mutates nothing. The matcher is one single-threaded actor processing one order at a time. Same input stream, same fills, every run.
+
+### II. Cache-line discipline (`ipc`)
 Standard queues suffer from false sharing. dex-core pins every ring-buffer slot to its own 64-byte cache line. A producer's write never invalidates a consumer's metadata.
 
-### II. Memory stability (`arena`)
-Orders live in a **generational arena** instead of `Box<Order>`. There are no syscalls and no lock contention. Allocation and removal are O(1). Indices stay stable when the data moves. The hot path is **zero-allocation**. A test enforces it.
+### III. Memory stability (`arena`)
+Orders live in a **generational arena** instead of `Box<Order>`. There are no syscalls and no lock contention. Allocation and removal are O(1). Indices stay stable when the data moves. The hot path is **zero-allocation**, and a `dhat`-instrumented proof binary enforces it: 500K operations, zero heap blocks, or the run fails.
 
-### III. Honest concurrency (`ipc`)
+### IV. Honest concurrency (`ipc`)
 The seqlock's optimistic read is a deliberate C11 data race. So loom can't model it directly. We verify what we can. loom checks the version ordering. Miri checks the unsafe code. A torn-read stress test covers the data path. The `Pod` payload bound makes a torn read safe to discard.
+
+### V. Origin tracing (`telemetry`)
+Latency is measured from the moment a message is born. A message carries its origin `rdtscp` tick: a few cycles to read, no syscall. Any stage downstream subtracts that tick from its own clock and knows the message's true age. The cross-core hop number is measured exactly this way; the consumer times the producer's embedded tick. The TSC is invariant and calibrated to wall-clock nanoseconds once at startup.
 
 ---
 
 ## 🔬 3. Micro-architectural analysis
+
+### The stack, layer by layer
+
+Each layer nests inside the next, so the costs compose. Latencies in ns from the published capture, one pinned isolated core at a measured 4.67 GHz.
+
+| layer | operation | p50 | p99 | p99.99 | per-core rate |
+| :--- | :--- | --: | --: | --: | --: |
+| `arena` | allocate a slot | 13 | 14 | 16 | 79.6M/s |
+| `orderbook` | pop the best order | 51 | 69 | 176 | 19.4M/s |
+| `matcher` | match one order, one fill | 65 | 86 | 222 | 15.2M/s |
+| `matcher` | realistic mixed workload | 76 | 637 | 919 | 4.5M/s |
+| `ipc` | publish an event | 14 | 16 | 19 | 71.6M/s |
+| `ipc` | core-to-core hop | 68 | 96 | 34,527 | — |
+
+<sub>Rates are derived `1/mean`: single-core ceilings, not sustained throughput. The hop runs open-loop at 1M msgs/s across pinned cores 2→3; its p99.99 includes the platform noise an honest histogram keeps.</sub>
 
 Wall-clock latency is one layer. We also audit the CPU pipeline. One command captures it. It needs `perf` and isolated cores.
 
@@ -91,7 +113,7 @@ $ cargo bench-all --crate matcher --intent perfstat
    L1-dcache-load-misses   265,518,940      #   1.98% of L1 accesses
 ```
 
-We report the raw counters. So you can check the IPC and the cache-miss rate yourself. The full capture lives in [`docs/perf/2026-06-10`](docs/perf/2026-06-10). It records the kernel, the governor, the effective clock, and every HDR histogram.
+We report the raw counters. So you can check the IPC and the cache-miss rate yourself. The full capture lives in [`docs/perf/2026-06-10`](docs/perf/2026-06-10). It records the kernel, the governor, the effective clock, and every HDR histogram. The capture index and the clock policy live in [`docs/perf/README.md`](docs/perf/README.md).
 
 ### Latency distributions
 
@@ -159,6 +181,7 @@ You need Rust 2024 (stable). Miri needs nightly. The plots need gnuplot. The dee
 
 ```bash
 cargo test  --workspace                                     # correctness
+cargo bench-all capture                                     # the full canonical capture -> docs/perf/<sha>
 cargo bench -p ipc --bench self_latency                     # per-op latency, HDR + SVG
 cargo bench -p ipc --bench cross_core                        # cross-core hop latency
 cargo run   -p ipc --release --example alloc_proof          # zero-allocation proof
@@ -183,6 +206,6 @@ cargo +nightly miri test -p ipc --test roundtrip --test lap_policy   # check the
 
 ## 📄 License
 
-This project is MIT licensed. See [LICENSE](LICENSE). Design notes live in [`docs/lld/`](docs/lld). There is one document per crate.
+This project is MIT licensed. See [LICENSE](LICENSE). Each crate has a low-level design document; they are being published alongside the engineering blog series.
 
 <sub>It is built in the open and measured at every layer.</sub>
