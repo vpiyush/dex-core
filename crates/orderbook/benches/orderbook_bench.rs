@@ -226,7 +226,7 @@ fn main() -> std::io::Result<()> {
         "extra p50 ns from O(depth/2) VecDeque scan vs FIFO hit",
     );
 
-    let paths = report.write_run("bench-runs", "orderbook")?;
+    let paths = report.write_run("orderbook")?;
     eprintln!(
         "benchmark run written:\n  {}\n  {}\n  {}/*.hdr",
         paths.markdown.display(),

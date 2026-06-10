@@ -401,7 +401,7 @@ fn main() -> std::io::Result<()> {
         .delta("FOK pre-check overhead (16 lvl)", &fok16, &cross16, Delta::Sub, "fok_success_n=16 − cross_n=16")
         .delta("FOK liquidity walk (16 lvl)", &fok_deep, &fok_fast, Delta::Sub, "fok_fail_deep − fok_fail_fast");
 
-    let paths = report.write_run("bench-runs", "matcher")?;
+    let paths = report.write_run("matcher")?;
     eprintln!(
         "benchmark run written:\n  {}\n  {}\n  {}/*.hdr",
         paths.markdown.display(),

@@ -32,7 +32,7 @@ mod alloc;
 pub use env::{RunEnv, Turbo};
 pub use iters::Iters;
 pub use lcg::Lcg;
-pub use report::{Comparison, Delta, Report, RunPaths, Verdict};
+pub use report::{Comparison, Delta, Report, RunPaths, Verdict, out_dir};
 pub use runner::Runner;
 pub use stats::{ArrivalModel, RunStats, Sample};
 pub use suite::{BenchmarkSuite, MeasurementIntent};

@@ -78,7 +78,7 @@ fn main() -> std::io::Result<()> {
     report.section("publish", &[&publish_s]);
     report.section("poll", &[&poll_hit_s, &poll_miss_s]);
 
-    let paths = report.write_run("bench-runs", "ipc_self_latency")?;
+    let paths = report.write_run("ipc_self_latency")?;
     eprintln!(
         "benchmark run written:\n  {}\n  {}\n  {}/*.hdr",
         paths.markdown.display(),

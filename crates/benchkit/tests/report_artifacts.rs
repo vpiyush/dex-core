@@ -45,7 +45,7 @@ fn writes_markdown_csv_and_hdr_files() {
     let dir_str = dir.to_str().unwrap();
     // SAFETY: single-threaded test; we set and use the override locally.
     unsafe { std::env::set_var("BENCH_OUT_DIR", dir_str) };
-    let paths = report.write_run("ignored_due_to_override", "smoke_suite").unwrap();
+    let paths = report.write_run("smoke_suite").unwrap();
     unsafe { std::env::remove_var("BENCH_OUT_DIR") };
 
     assert!(paths.markdown.exists(), "markdown written");

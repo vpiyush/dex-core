@@ -78,7 +78,7 @@ fn main() -> std::io::Result<()> {
     let mut report = Report::new(&env, "Arena benchmark", scope);
     report.section("Slot management", &[&alloc_s, &remove_s]);
 
-    let paths = report.write_run("bench-runs", "arena")?;
+    let paths = report.write_run("arena")?;
     eprintln!(
         "benchmark run written:\n  {}\n  {}\n  {}/*.hdr",
         paths.markdown.display(),

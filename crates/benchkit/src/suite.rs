@@ -159,7 +159,8 @@ impl BenchmarkSuite {
     }
 
     /// Build the report (one section per regime, each stamped with how it was
-    /// measured) and write md/csv/hdr artifacts to `bench-runs/`. Prints RunEnv
+    /// measured) and write md/csv/hdr artifacts to [`crate::out_dir`]
+    /// (`bench-runs/` by default, `BENCH_OUT_DIR` to route). Prints RunEnv
     /// warnings and any requested-but-out-of-process regimes to stderr.
     pub fn finish_and_report(self) -> std::io::Result<crate::report::RunPaths> {
         let scope = format!(
@@ -193,7 +194,7 @@ impl BenchmarkSuite {
             );
         }
 
-        let paths = report.write_run("bench-runs", &self.name)?;
+        let paths = report.write_run(&self.name)?;
         eprintln!(
             "benchmark run written:\n  {}\n  {}\n  {}/*.hdr",
             paths.markdown.display(),

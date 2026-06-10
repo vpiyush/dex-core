@@ -167,26 +167,15 @@ impl<'a> Report<'a> {
         s
     }
 
-    /// Write `<dir>/<name>_<id>.{md,csv}` and `<dir>/<name>_<id>_hdr/<scenario>.hdr`,
-    /// where `<id>` is [`RunEnv::run_id`] — the git short sha (`-dirty` suffixed on
-    /// a modified tree), falling back to the UTC timestamp off-git.
-    ///
-    /// Directory resolution, in priority order: (1) `BENCH_OUT_DIR` env var, if
-    /// set (used verbatim); (2) else `<workspace-root>/<dir>`, where the
-    /// workspace root is the nearest ancestor whose `Cargo.toml` declares
-    /// `[workspace]`.
-    /// This makes every crate's `cargo bench -p <crate>` land in ONE shared
-    /// `bench-runs/` at the workspace root, regardless of the per-crate cwd that
-    /// cargo sets. Falls back to `dir` relative to cwd if no workspace is found.
-    pub fn write_run(&self, dir: &str, name: &str) -> std::io::Result<RunPaths> {
-        let dir = match std::env::var("BENCH_OUT_DIR") {
-            Ok(d) => d,
-            Err(_) => match workspace_root() {
-                Some(root) => root.join(dir).to_string_lossy().into_owned(),
-                None => dir.to_string(),
-            },
-        };
+    /// Write `<name>_<id>.{md,csv}` and `<name>_<id>_hdr/<scenario>.hdr` into
+    /// [`out_dir`], where `<id>` is [`RunEnv::run_id`] — the git short sha
+    /// (`-dirty` suffixed on a modified tree), falling back to the UTC timestamp
+    /// off-git. The directory is `bench-runs/` at the workspace root by default;
+    /// an orchestrator routes the whole run elsewhere via `BENCH_OUT_DIR`.
+    pub fn write_run(&self, name: &str) -> std::io::Result<RunPaths> {
+        let dir = out_dir();
         std::fs::create_dir_all(&dir)?;
+        let dir = dir.to_string_lossy();
         // Artifacts are keyed by the code that produced them (git sha, or the
         // timestamp off-git), so a rerun at the same clean commit overwrites in
         // place — one commit, one canonical set of numbers.
@@ -267,6 +256,25 @@ fn gnuplot_script(title: &str, hdr_dirname: &str, svg_name: &str, labels: &[Stri
 /// Escape characters that would break a gnuplot double-quoted string / title.
 fn gp_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"").replace('\'', "")
+}
+
+/// The artifact output directory — the single routing point for EVERYTHING a
+/// bench process writes (reports, raw `.hdr` files, dhat json). Resolution, in
+/// priority order: (1) `BENCH_OUT_DIR`, used verbatim — the orchestrator's hook
+/// for aiming a whole run at a capture or scratch dir; (2) else
+/// `<workspace-root>/bench-runs`; (3) else `bench-runs` relative to the cwd.
+///
+/// (2) matters because cargo gives bench binaries the package dir as cwd but
+/// `cargo run --example` keeps the invoker's cwd — a relative path would land
+/// artifacts in different places depending on how the binary was launched.
+pub fn out_dir() -> PathBuf {
+    match std::env::var("BENCH_OUT_DIR") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => match workspace_root() {
+            Some(root) => root.join("bench-runs"),
+            None => PathBuf::from("bench-runs"),
+        },
+    }
 }
 
 /// Walk up from the current directory to the workspace root — the nearest
