@@ -9,7 +9,7 @@ use crate::matching::{match_limit};
 #[derive(Debug, PartialEq, Eq)]
 pub enum AddInstrumentError {
     AlreadyRegistered,
-    InvalidCapacity, // capacity must be in (0, u32::MAX)
+    InvalidCapacity, // capacity must be in (0, arena::MAX_CAPACITY)
 }
 
 pub struct Engine {
@@ -26,7 +26,7 @@ impl Engine {
     }
 
     pub fn add_instrument(&mut self, instrument_id: u32, book_capacity: u32) -> Result<(), AddInstrumentError> {
-        if book_capacity == 0 || book_capacity == u32::MAX {
+        if book_capacity == 0 || book_capacity == arena::MAX_CAPACITY {
             return Err(AddInstrumentError::InvalidCapacity);
         }
         if self.books.contains_key(&instrument_id) {

@@ -45,7 +45,9 @@ impl ArenaIdx {
 }
 
 use core::mem::MaybeUninit;
-const MAX_CAPACITY:usize = u32::MAX as usize;
+
+// the largest capacity arena accepts
+pub const MAX_CAPACITY:u32 = u32::MAX - 1;
 
 pub struct Arena<T> {
     // we deliberately don't choose vec, since it can be realloced ad moved into memory, which would invalidated the existing references
@@ -71,7 +73,7 @@ impl <T> Arena<T> {
             //  value as the next free slot index
         // layout assertions
         let _ = Self::ASSERT_T_LAYOUT;
-        assert!(capacity > 0 && capacity < u32::MAX , "invalid capacity");
+        assert!(capacity > 0 && capacity <= u32::MAX , "invalid capacity");
         // create the memory directly into heap
         let mut slots: Vec<Slot<T>> = (0..capacity).map(|_| Slot {
             generation: 1,
@@ -118,7 +120,7 @@ impl <T> Arena<T> {
 
     pub fn alloc(&mut self, value: T) ->Option<ArenaIdx> {
         // todo: full arena handling, should we overwrite the old values ?
-        if self.len >= MAX_CAPACITY || self.free_head == u32::MAX {
+        if self.len >= MAX_CAPACITY as usize || self.free_head == u32::MAX {
             return None
         }
 
