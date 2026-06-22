@@ -16,9 +16,9 @@
 //! rejects it, and FOK is gated up front so it either fully fills or never
 //! touches the book.
 //!
+use crate::{EventSink, events::push_reject};
 use orderbook::{InsertError, OrderBook};
 use types::{Order, OrderEvent, OrderId, OrderRequest, RejectReason, Side, TimeInForce};
-use crate::events::push_reject;
 
 /// Match a limit order against the opposite side, then apply its time-in-force residual policy.
 ///
@@ -51,9 +51,14 @@ use crate::events::push_reject;
 /// 2. pushing to out vector is not ideal from performance point of view, there are two
 ///    possible alternatives.
 ///    - direct use the seqlock ipc here, but increase coupling with different crate.
-///    - use an event sink, can caller can choose where it lands.
+///    - use an event sink, can caller can choose where it lands. - resolved
 ///
-pub(crate) fn match_limit(book: &mut OrderBook, req: &OrderRequest, order_id: u64, out: &mut Vec<OrderEvent>) {
+pub(crate) fn match_limit(
+    book: &mut OrderBook,
+    req: &OrderRequest,
+    order_id: u64,
+    out: &mut impl EventSink,
+) {
     // FOK (Fill-or-Kill) is all-or-nothing: prove the full quantity is fillable
     // BEFORE we touch the book, so a failure emits zero fills instead of
     // partials we'd have to unwind. Nothing has filled yet, so the rejected
@@ -71,7 +76,10 @@ pub(crate) fn match_limit(book: &mut OrderBook, req: &OrderRequest, order_id: u6
     match req.tif {
         // pre-check done, everything should have been consumed
         TimeInForce::FOK => {
-            debug_assert!(false, "FOK left a residual, must never happen, pre-check must have prevented this")
+            debug_assert!(
+                false,
+                "FOK left a residual, must never happen, pre-check must have prevented this"
+            )
         }
         // take what crossed and reject the unfilled remainder, never rest
         TimeInForce::IOC => {
@@ -93,7 +101,7 @@ pub(crate) fn match_limit(book: &mut OrderBook, req: &OrderRequest, order_id: u6
                 intent_hash: req.intent_hash,
             };
             match book.insert(resting) {
-                Ok(_) => out.push(OrderEvent::New(resting)),
+                Ok(_) => out.emit(OrderEvent::New(resting)),
                 Err(InsertError::ArenaFull) => {
                     push_reject(RejectReason::SystemAtCapacity, remaining, req, out);
                 }
@@ -107,33 +115,38 @@ pub(crate) fn match_limit(book: &mut OrderBook, req: &OrderRequest, order_id: u6
 
 fn has_sufficient_liquidity(book: &OrderBook, req: &OrderRequest) -> bool {
     match req.side {
-        Side::Bid => {
-            liquidity_reaches(book.ask_depth(usize::MAX), Side::Bid, req.price, req.quantity)
-        }
-        Side::Ask => {
-            liquidity_reaches(book.bid_depth(usize::MAX), Side::Ask, req.price, req.quantity)
-        }
+        Side::Bid => liquidity_reaches(
+            book.ask_depth(usize::MAX),
+            Side::Bid,
+            req.price,
+            req.quantity,
+        ),
+        Side::Ask => liquidity_reaches(
+            book.bid_depth(usize::MAX),
+            Side::Ask,
+            req.price,
+            req.quantity,
+        ),
     }
-
 }
 
 #[inline]
 fn liquidity_reaches(
-    levels: impl Iterator<Item=(u64, u64)>,
+    levels: impl Iterator<Item = (u64, u64)>,
     taker_side: Side,
     taker_price: u64,
-    required: u64
-) -> bool{
+    required: u64,
+) -> bool {
     let mut acc: u64 = 0;
     for (price, qty) in levels {
         if !crossing(taker_side, taker_price, price) {
-            break
+            break;
         }
         acc += qty;
         if acc >= required {
-            return true
+            return true;
         }
-    };
+    }
     false
 }
 
@@ -152,16 +165,25 @@ fn cross_loop(
     book: &mut OrderBook,
     req: &OrderRequest,
     order_id: u64,
-    out: &mut Vec<OrderEvent>,
+    out: &mut impl EventSink,
 ) -> u64 {
     let opposite = opposite(req.side);
     let mut remaining = req.quantity;
 
     while remaining > 0 {
         let (maker_price, maker_qty, maker_id, maker_intent) = {
-            let Some(top) = book.peek_top(opposite) else { break };
-            if !crossing(req.side, req.price, top.price) { break }
-            (top.price, top.order.quantity, top.order.order_id.0, top.order.intent_hash)
+            let Some(top) = book.peek_top(opposite) else {
+                break;
+            };
+            if !crossing(req.side, req.price, top.price) {
+                break;
+            }
+            (
+                top.price,
+                top.order.quantity,
+                top.order.order_id.0,
+                top.order.intent_hash,
+            )
         };
 
         let fill_qty = remaining.min(maker_qty);
@@ -171,7 +193,7 @@ fn cross_loop(
 
         // Taker fill event
         if remaining == 0 {
-            out.push(OrderEvent::Fill {
+            out.emit(OrderEvent::Fill {
                 id: order_id,
                 fill_qty,
                 fill_price,
@@ -179,7 +201,7 @@ fn cross_loop(
                 intent_hash: req.intent_hash,
             });
         } else {
-            out.push(OrderEvent::PartialFill {
+            out.emit(OrderEvent::PartialFill {
                 id: order_id,
                 fill_qty,
                 fill_price,
@@ -191,7 +213,7 @@ fn cross_loop(
 
         // Maker fill event + book mutation
         if maker_remaining == 0 {
-            out.push(OrderEvent::Fill {
+            out.emit(OrderEvent::Fill {
                 id: maker_id,
                 fill_qty,
                 fill_price,
@@ -200,7 +222,7 @@ fn cross_loop(
             });
             book.pop_top(opposite);
         } else {
-            out.push(OrderEvent::PartialFill {
+            out.emit(OrderEvent::PartialFill {
                 id: maker_id,
                 fill_qty,
                 fill_price,

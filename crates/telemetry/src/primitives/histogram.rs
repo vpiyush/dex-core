@@ -3,21 +3,24 @@ use crate::primitives::Nanos;
 #[cfg(feature = "histogram")]
 pub struct Histogram {
     inner: hdrhistogram::Histogram<u64>,
-    label: String
+    label: String,
 }
 
 #[cfg(feature = "histogram")]
 impl Histogram {
     pub fn new(label: impl Into<String>) -> Self {
         Self {
-            inner: hdrhistogram::Histogram::<u64>::new_with_max(u64::MAX, 3).expect("failed to create histogram"),
+            inner: hdrhistogram::Histogram::<u64>::new_with_max(u64::MAX, 3)
+                .expect("failed to create histogram"),
             label: label.into(),
         }
     }
 
     #[inline(always)]
     pub fn record(&mut self, value: Nanos) {
-        self.inner.record(value.as_u64()).expect("Nanos cannot exceed histogram bounds");
+        self.inner
+            .record(value.as_u64())
+            .expect("Nanos cannot exceed histogram bounds");
     }
 
     /// Record `value`, back-filling synthetic samples for an expected arrival
@@ -93,7 +96,9 @@ impl Histogram {
     }
 
     pub fn merge(&mut self, other: &Self) {
-        self.inner.add(&other.inner).expect("failed to add histogram");
+        self.inner
+            .add(&other.inner)
+            .expect("failed to add histogram");
     }
 
     /// Render the HDR **percentile distribution** in the text format consumed
@@ -113,7 +118,11 @@ impl Histogram {
         for v in self.inner.iter_quantiles(ticks) {
             running_total += v.count_since_last_iteration();
             let q = v.quantile();
-            let inv = if q < 1.0 { 1.0 / (1.0 - q) } else { f64::INFINITY };
+            let inv = if q < 1.0 {
+                1.0 / (1.0 - q)
+            } else {
+                f64::INFINITY
+            };
             s.push_str(&format!(
                 "{:12} {:.12} {:10} {:14.2}\n",
                 v.value_iterated_to(),
@@ -180,7 +189,9 @@ mod tests {
     #[test]
     fn known_distribution_percentiles_are_correct() {
         let mut h = Histogram::new("test");
-        for i in 1..=10_000u64 { h.record(Nanos(i)); }
+        for i in 1..=10_000u64 {
+            h.record(Nanos(i));
+        }
         // 3-sigfig precision → ~0.1% tolerance
         assert!((h.p50().as_u64() as i64 - 5000).abs() < 10);
         assert!((h.p99().as_u64() as i64 - 9900).abs() < 20);
@@ -204,10 +215,19 @@ mod tests {
         // Plain: exactly 1000 samples, p99.99 sees the lone spike modestly.
         assert_eq!(plain.len(), 1_000);
         // Corrected: the stall back-fills ~99 synthetic samples (1000/10 - 1).
-        assert!(corrected.len() > plain.len(), "CO correction adds samples: {} vs {}", corrected.len(), plain.len());
+        assert!(
+            corrected.len() > plain.len(),
+            "CO correction adds samples: {} vs {}",
+            corrected.len(),
+            plain.len()
+        );
         // The corrected p99 is pulled up by the back-filled latencies.
-        assert!(corrected.p99().as_u64() > plain.p99().as_u64(),
-            "corrected p99 {} should exceed plain p99 {}", corrected.p99().as_u64(), plain.p99().as_u64());
+        assert!(
+            corrected.p99().as_u64() > plain.p99().as_u64(),
+            "corrected p99 {} should exceed plain p99 {}",
+            corrected.p99().as_u64(),
+            plain.p99().as_u64()
+        );
     }
 
     #[test]
@@ -215,8 +235,14 @@ mod tests {
         let mut a = Histogram::new("a");
         let mut b = Histogram::new("b");
         let mut c = Histogram::new("c");
-        for i in 1..=5_000u64   { a.record(Nanos(i)); c.record(Nanos(i)); }
-        for i in 5_001..=10_000 { b.record(Nanos(i)); c.record(Nanos(i)); }
+        for i in 1..=5_000u64 {
+            a.record(Nanos(i));
+            c.record(Nanos(i));
+        }
+        for i in 5_001..=10_000 {
+            b.record(Nanos(i));
+            c.record(Nanos(i));
+        }
         a.merge(&b);
         assert_eq!(a.len(), c.len());
         assert_eq!(a.p50().as_u64(), c.p50().as_u64());
@@ -235,7 +261,9 @@ mod tests {
         // Regression: ensure we divide by 100. If someone "fixes" this,
         // percentile(50.0) starts returning max, and this test fires.
         let mut h = Histogram::new("test");
-        for i in 1..=10_000u64 { h.record(Nanos(i)); }
+        for i in 1..=10_000u64 {
+            h.record(Nanos(i));
+        }
         assert_eq!(h.percentile(50.0).as_u64(), h.p50().as_u64());
         assert_eq!(h.percentile(99.0).as_u64(), h.p99().as_u64());
     }
@@ -244,7 +272,9 @@ mod tests {
     fn throughput_is_inverse_of_mean() {
         // constant 500 ns service time → mean ≈ 500 ns → 1e9 / 500 = 2,000,000 msg/s
         let mut h = Histogram::new("test");
-        for _ in 0..1_000 { h.record(Nanos(500)); }
+        for _ in 0..1_000 {
+            h.record(Nanos(500));
+        }
         assert!(
             (h.throughput_per_sec() - 2_000_000.0).abs() < 20_000.0,
             "got {}",
@@ -272,8 +302,16 @@ mod tests {
             .lines()
             .rfind(|l| !l.starts_with('#') && !l.trim().is_empty() && !l.contains("Percentile"))
             .unwrap();
-        let total: u64 = last_data.split_whitespace().nth(2).unwrap().parse().unwrap();
-        assert_eq!(total, 10_000, "running TotalCount must reach the sample count");
+        let total: u64 = last_data
+            .split_whitespace()
+            .nth(2)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            total, 10_000,
+            "running TotalCount must reach the sample count"
+        );
     }
 
     #[test]

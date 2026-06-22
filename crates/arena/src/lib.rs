@@ -23,7 +23,7 @@
 // Arena Idx is the Index of the slot in the arena. It also holds the generation
 // to avoid acting on stale entries.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub struct ArenaIdx{
+pub struct ArenaIdx {
     slot: u32,
     generation: u32, // generation changes on a use-after-free basis
 }
@@ -31,67 +31,71 @@ pub struct ArenaIdx{
 impl ArenaIdx {
     // a handle that is guaranteed never to have real value,
     // this is the default for an arena
-    pub const SENTINEL:Self = Self{slot: 0, generation: 0};
+    pub const SENTINEL: Self = Self {
+        slot: 0,
+        generation: 0,
+    };
 
     // returns false for sentinel values and true if arena ever had
     // an object
-    pub fn is_valid(self: Self) -> bool {
+    pub fn is_valid(self) -> bool {
         self != Self::SENTINEL
     }
 
     pub fn new(slot: u32, generation: u32) -> Self {
-        Self{slot, generation}
+        Self { slot, generation }
     }
 }
 
 use core::mem::MaybeUninit;
 
 // the largest capacity arena accepts
-pub const MAX_CAPACITY:u32 = u32::MAX - 1;
+pub const MAX_CAPACITY: u32 = u32::MAX - 1;
 
 pub struct Arena<T> {
     // we deliberately don't choose vec, since it can be realloced ad moved into memory, which would invalidated the existing references
-    slots : Box<[Slot<T>]>,
+    slots: Box<[Slot<T>]>,
     free_head: u32,
-    len : usize,
+    len: usize,
 }
 
-impl <T> Arena<T> {
-
+impl<T> Arena<T> {
     // assert T layout
-    const ASSERT_T_LAYOUT: () =  {
-        assert!(core::mem::size_of::<T>() >=4, "Arena <T> must be at least 4 bytes");
-        assert!(core::mem::align_of::<T>() >=4, "Arena <T> must be at least 4 byte aligned");
+    const ASSERT_T_LAYOUT: () = {
+        assert!(
+            core::mem::size_of::<T>() >= 4,
+            "Arena <T> must be at least 4 bytes"
+        );
+        assert!(
+            core::mem::align_of::<T>() >= 4,
+            "Arena <T> must be at least 4 byte aligned"
+        );
     };
 
-    pub fn new(capacity: u32 ) -> Self {
+    pub fn new(capacity: u32) -> Self {
         // setup arena
         // allocate the chunk with capacity
         // initialize each slot with:
-            // generation 0
-            // occupied 0
-            //  value as the next free slot index
+        // generation 0
+        // occupied 0
+        //  value as the next free slot index
         // layout assertions
         let _ = Self::ASSERT_T_LAYOUT;
-        assert!(capacity > 0 && capacity <= u32::MAX , "invalid capacity");
+        assert!(capacity > 0 && capacity < u32::MAX, "invalid capacity");
         // create the memory directly into heap
-        let mut slots: Vec<Slot<T>> = (0..capacity).map(|_| Slot {
-            generation: 1,
-            occupied: 0,
-            value: MaybeUninit::uninit()
-        }).collect();
+        let mut slots: Vec<Slot<T>> = (0..capacity)
+            .map(|_| Slot {
+                generation: 1,
+                occupied: 0,
+                value: MaybeUninit::uninit(),
+            })
+            .collect();
 
         for i in 0..capacity {
-            let next_idx = if i + 1 < capacity {
-                i + 1
-            } else {
-                u32::MAX
-            };
+            let next_idx = if i + 1 < capacity { i + 1 } else { u32::MAX };
             // write next
-            unsafe  {
-                slots[i as usize].write_next_free(next_idx)
-            }
-        };
+            unsafe { slots[i as usize].write_next_free(next_idx) }
+        }
         Self {
             slots: slots.into_boxed_slice(),
             free_head: 0,
@@ -103,25 +107,24 @@ impl <T> Arena<T> {
         if !idx.is_valid() {
             return None;
         }
-        self.slots.get(idx.slot as usize).and_then(|slot| {
-            slot.get(idx.generation)
-        })
+        self.slots
+            .get(idx.slot as usize)
+            .and_then(|slot| slot.get(idx.generation))
     }
 
     pub fn get_mut(&mut self, idx: ArenaIdx) -> Option<&mut T> {
         if !idx.is_valid() {
             return None;
         }
-        self.slots.get_mut(idx.slot as usize).and_then(|slot| {
-            slot.get_mut(idx.generation)
-        })
+        self.slots
+            .get_mut(idx.slot as usize)
+            .and_then(|slot| slot.get_mut(idx.generation))
     }
 
-
-    pub fn alloc(&mut self, value: T) ->Option<ArenaIdx> {
+    pub fn alloc(&mut self, value: T) -> Option<ArenaIdx> {
         // todo: full arena handling, should we overwrite the old values ?
         if self.len >= MAX_CAPACITY as usize || self.free_head == u32::MAX {
-            return None
+            return None;
         }
 
         let slot_idx = self.free_head;
@@ -132,7 +135,10 @@ impl <T> Arena<T> {
 
         self.free_head = next_free_slot;
         self.len += 1;
-        Some( ArenaIdx{slot: slot_idx, generation} )
+        Some(ArenaIdx {
+            slot: slot_idx,
+            generation,
+        })
     }
 
     pub fn remove(&mut self, arena_idx: ArenaIdx) -> Option<T> {
@@ -142,10 +148,9 @@ impl <T> Arena<T> {
         // and update the free head to the slot itself
         unsafe { slot.write_next_free(self.free_head) };
         self.len -= 1;
-        self.free_head = arena_idx.slot ;
+        self.free_head = arena_idx.slot;
         Some(value)
     }
-
 }
 
 impl<T> Drop for Arena<T> {
@@ -156,11 +161,12 @@ impl<T> Drop for Arena<T> {
         }
         for slot in self.slots.iter_mut() {
             if slot.occupied == 1 {
-                unsafe { slot.value.assume_init_drop(); }
+                unsafe {
+                    slot.value.assume_init_drop();
+                }
             }
         }
     }
-
 }
 
 // a slot in the arena, updates generation every times it's reused
@@ -168,10 +174,10 @@ impl<T> Drop for Arena<T> {
 pub struct Slot<T> {
     generation: u32,
     occupied: u8,
-    value: MaybeUninit<T>
+    value: MaybeUninit<T>,
 }
 
-impl<T> Slot<T>{
+impl<T> Slot<T> {
     fn insert(&mut self, value: T) {
         debug_assert_eq!(self.occupied, 0, "insert on occupied slot");
         self.value.write(value);
@@ -189,7 +195,9 @@ impl<T> Slot<T>{
     fn get_mut(&mut self, generation: u32) -> Option<&mut T> {
         if self.occupied == 1 && generation == self.generation {
             Some(unsafe { self.value.assume_init_mut() })
-        } else { None }
+        } else {
+            None
+        }
     }
 
     fn remove(&mut self, generation: u32) -> Option<T> {
@@ -201,29 +209,25 @@ impl<T> Slot<T>{
             0 => 1,
             generation => generation,
         };
-        Some( unsafe { self.value.assume_init_read() })
+        Some(unsafe { self.value.assume_init_read() })
     }
 
-    unsafe fn write_next_free(&mut self, next:u32) {
+    unsafe fn write_next_free(&mut self, next: u32) {
         let ptr = self.value.as_mut_ptr() as *mut u32;
-        unsafe  {
-            ptr.write(next)
-        }
+        unsafe { ptr.write(next) }
     }
 
     unsafe fn read_next_free(&self) -> u32 {
         let ptr = self.value.as_ptr() as *const u32;
-        unsafe  {
-            ptr.read()
-        }
+        unsafe { ptr.read() }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use bytemuck::Zeroable;
     use types::{IntentHash, OrderId};
-    use super::*;
 
     // ----- §12.1 Round-trip and basic operations --------------------------------
 
@@ -294,7 +298,10 @@ mod tests {
         let mut arena = Arena::<u64>::new(2);
         let _a = arena.alloc(1).unwrap();
         let _b = arena.alloc(2).unwrap();
-        assert!(arena.alloc(3).is_none(), "alloc on full arena must return None");
+        assert!(
+            arena.alloc(3).is_none(),
+            "alloc on full arena must return None"
+        );
     }
 
     #[test]
@@ -351,7 +358,10 @@ mod tests {
         );
 
         let new_idx = arena.alloc(99).unwrap();
-        assert!(new_idx.is_valid(), "post-wraparound handle must not equal SENTINEL");
+        assert!(
+            new_idx.is_valid(),
+            "post-wraparound handle must not equal SENTINEL"
+        );
         assert_eq!(new_idx.generation, 1);
     }
 
@@ -374,13 +384,14 @@ mod tests {
         {
             let mut arena = Arena::<Tracker>::new(4);
             let _ = arena.alloc(Tracker(1)).unwrap();
-            let b   = arena.alloc(Tracker(2)).unwrap();
+            let b = arena.alloc(Tracker(2)).unwrap();
             let _ = arena.alloc(Tracker(3)).unwrap();
             arena.remove(b); // drops Tracker(2) as the returned Option<T> dies
-        }                    // arena drops here; expect 2 more drops
+        } // arena drops here; expect 2 more drops
 
         assert_eq!(
-            DROPS.load(Ordering::Relaxed), 3,
+            DROPS.load(Ordering::Relaxed),
+            3,
             "Drop did not run on all live occupants"
         );
     }
@@ -410,7 +421,7 @@ mod tests {
 
     #[test]
     fn instantiates_with_order() {
-        use types::{Order, Side, OrderType, TimeInForce};
+        use types::{Order, OrderType, Side, TimeInForce};
         let mut a = Arena::<Order>::new(2);
         let order = Order {
             order_id: OrderId(1),
@@ -422,10 +433,13 @@ mod tests {
             order_type: OrderType::Limit,
             tif: TimeInForce::IOC,
             _padding: 0,
-            intent_hash: IntentHash::zeroed()
+            intent_hash: IntentHash::zeroed(),
         };
         let i = a.alloc(order).unwrap();
-        assert!(a.get(i).is_some(), "Arena<Order> alloc/get round-trip failed");
+        assert!(
+            a.get(i).is_some(),
+            "Arena<Order> alloc/get round-trip failed"
+        );
     }
 
     // ----- Extras: free-list integrity guards -----------------------------------
@@ -454,3 +468,4 @@ mod tests {
         assert_eq!(arena.len, 0, "len underflowed on stale remove");
     }
 }
+

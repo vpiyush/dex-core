@@ -1,10 +1,13 @@
-use rustc_hash::FxHashMap;
-use orderbook::OrderBook;
-use types::{OrderEvent, OrderRequest, RejectReason, RequestType};
-use crate::events::{push_cancel, push_reject};
 #[cfg(debug_assertions)]
 use crate::invariants::assert_invariants;
-use crate::matching::{match_limit};
+use crate::matching::match_limit;
+use crate::{
+    EventSink,
+    events::{push_cancel, push_reject},
+};
+use orderbook::OrderBook;
+use rustc_hash::FxHashMap;
+use types::{OrderRequest, RejectReason, RequestType};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum AddInstrumentError {
@@ -13,7 +16,7 @@ pub enum AddInstrumentError {
 }
 
 pub struct Engine {
-    books: FxHashMap<u32, orderbook::OrderBook>,
+    books: FxHashMap<u32, OrderBook>,
     next_order_id: u64, // monotonically increasing unique ID across all instruments
 }
 
@@ -21,11 +24,15 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             books: FxHashMap::default(),
-            next_order_id: 0
+            next_order_id: 0,
         }
     }
 
-    pub fn add_instrument(&mut self, instrument_id: u32, book_capacity: u32) -> Result<(), AddInstrumentError> {
+    pub fn add_instrument(
+        &mut self,
+        instrument_id: u32,
+        book_capacity: u32,
+    ) -> Result<(), AddInstrumentError> {
         if book_capacity == 0 || book_capacity == arena::MAX_CAPACITY {
             return Err(AddInstrumentError::InvalidCapacity);
         }
@@ -33,7 +40,8 @@ impl Engine {
             return Err(AddInstrumentError::AlreadyRegistered);
         }
 
-        self.books.insert(instrument_id, OrderBook::new(instrument_id, book_capacity));
+        self.books
+            .insert(instrument_id, OrderBook::new(instrument_id, book_capacity));
         Ok(())
     }
 
@@ -47,11 +55,11 @@ impl Engine {
         id
     }
 
-    pub fn process(&mut self, req: &OrderRequest, out: &mut Vec<OrderEvent>) {
+    pub fn process(&mut self, req: &OrderRequest, out: &mut impl EventSink) {
         match req.request_type {
-           RequestType::New => {
-               self.process_new(req, out);
-           }
+            RequestType::New => {
+                self.process_new(req, out);
+            }
             RequestType::Cancel => {
                 self.process_cancel(req, out);
             }
@@ -63,7 +71,7 @@ impl Engine {
         assert_invariants(self);
     }
 
-    fn process_new(&mut self, req: &OrderRequest, out: &mut Vec<OrderEvent>) {
+    fn process_new(&mut self, req: &OrderRequest, out: &mut impl EventSink) {
         // instrument exists
         if !self.books.contains_key(&req.instrument_id) {
             push_reject(RejectReason::UnknownInstrument, req.quantity, req, out);
@@ -82,38 +90,35 @@ impl Engine {
 
         // validation passed - burn an orderID
         let order_id = self.mint_order_id();
-        let book = self.books .get_mut(&req.instrument_id)
+        let book = self
+            .books
+            .get_mut(&req.instrument_id)
             .expect("invariant: book existence checked at step 1");
         match_limit(book, req, order_id, out)
     }
 
     // process order cancel request
-    fn process_cancel(&mut self, req: &OrderRequest, out: &mut Vec<OrderEvent>) {
+    fn process_cancel(&mut self, req: &OrderRequest, out: &mut impl EventSink) {
         let Some(book) = self.books.get_mut(&req.instrument_id) else {
             // Cancel-path reject: no fill semantics, remaining_qty = 0.
             return push_reject(RejectReason::UnknownInstrument, 0, req, out);
         };
 
         match book.cancel(&req.intent_hash) {
-            Some(order) => {
-                push_cancel(order.order_id.0, req, out)
-            }
-            None => {
-                push_reject(RejectReason::UnknownOrder, 0, req, out)
-            }
+            Some(order) => push_cancel(order.order_id.0, req, out),
+            None => push_reject(RejectReason::UnknownOrder, 0, req, out),
         }
     }
 
-    fn process_amend(&mut self, _req: &OrderRequest, _out: &mut Vec<OrderEvent>) {
+    fn process_amend(&mut self, _req: &OrderRequest, _out: &mut impl EventSink) {
         todo!("amend deferred to later")
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types::{IntentHash, Order, OrderType, Side, TimeInForce};
+    use types::{IntentHash, Order, OrderEvent, OrderType, Side, TimeInForce};
 
     const INSTR: u32 = 1;
 
@@ -151,8 +156,21 @@ mod tests {
     /// Rest a GTC maker on the book and assert it actually rested.
     fn rest_maker(e: &mut Engine, side: Side, price: u64, qty: u64, hash_byte: u8) {
         let mut out = Vec::new();
-        e.process(&req(side, price, qty, TimeInForce::GTC, RequestType::New, hash_byte), &mut out);
-        assert!(matches!(out.as_slice(), [OrderEvent::New(_)]), "maker should rest, got {out:?}");
+        e.process(
+            &req(
+                side,
+                price,
+                qty,
+                TimeInForce::GTC,
+                RequestType::New,
+                hash_byte,
+            ),
+            &mut out,
+        );
+        assert!(
+            matches!(out.as_slice(), [OrderEvent::New(_)]),
+            "maker should rest, got {out:?}"
+        );
     }
 
     /// Process one request and return only the events it produced.
@@ -174,7 +192,11 @@ mod tests {
     /// (reason, remaining_qty) of the single Reject, if any.
     fn reject(ev: &[OrderEvent]) -> Option<(RejectReason, u64)> {
         ev.iter().find_map(|e| match e {
-            OrderEvent::Reject { reason, remaining_qty, .. } => Some((*reason, *remaining_qty)),
+            OrderEvent::Reject {
+                reason,
+                remaining_qty,
+                ..
+            } => Some((*reason, *remaining_qty)),
             _ => None,
         })
     }
@@ -191,7 +213,10 @@ mod tests {
     #[test]
     fn gtc_with_no_cross_rests_whole_order() {
         let mut e = engine_with_book();
-        let out = run(&mut e, &req(Side::Bid, 100, 10, TimeInForce::GTC, RequestType::New, 1));
+        let out = run(
+            &mut e,
+            &req(Side::Bid, 100, 10, TimeInForce::GTC, RequestType::New, 1),
+        );
 
         assert_eq!(fill_count(&out), 0);
         assert!(reject(&out).is_none());
@@ -207,7 +232,10 @@ mod tests {
         let mut e = engine_with_book();
         rest_maker(&mut e, Side::Ask, 100, 4, 1);
 
-        let out = run(&mut e, &req(Side::Bid, 100, 10, TimeInForce::GTC, RequestType::New, 2));
+        let out = run(
+            &mut e,
+            &req(Side::Bid, 100, 10, TimeInForce::GTC, RequestType::New, 2),
+        );
 
         // 4 crossed (one taker + one maker event); remainder 6 rests.
         assert_eq!(fill_count(&out), 2);
@@ -216,7 +244,11 @@ mod tests {
 
         let book = e.book(INSTR).unwrap();
         assert!(book.best_ask().is_none(), "ask fully consumed");
-        assert_eq!(book.best_bid().unwrap().1.total_qty(), 6, "remainder rests as bid");
+        assert_eq!(
+            book.best_bid().unwrap().1.total_qty(),
+            6,
+            "remainder rests as bid"
+        );
     }
 
     // --- IOC ---------------------------------------------------------------
@@ -227,7 +259,10 @@ mod tests {
         let mut e = engine_with_book();
         rest_maker(&mut e, Side::Ask, 100, 4, 1);
 
-        let out = run(&mut e, &req(Side::Bid, 100, 10, TimeInForce::IOC, RequestType::New, 2));
+        let out = run(
+            &mut e,
+            &req(Side::Bid, 100, 10, TimeInForce::IOC, RequestType::New, 2),
+        );
 
         assert_eq!(fill_count(&out), 2, "4 units crossed");
         assert_eq!(
@@ -235,16 +270,25 @@ mod tests {
             Some((RejectReason::InsufficientLiquidity, 6)),
             "reject must report the 6 unfilled units, not the original 10"
         );
-        assert!(e.book(INSTR).unwrap().best_bid().is_none(), "IOC never rests");
+        assert!(
+            e.book(INSTR).unwrap().best_bid().is_none(),
+            "IOC never rests"
+        );
     }
 
     #[test]
     fn ioc_with_no_liquidity_rejects_full_quantity_no_fills() {
         let mut e = engine_with_book();
-        let out = run(&mut e, &req(Side::Bid, 100, 10, TimeInForce::IOC, RequestType::New, 1));
+        let out = run(
+            &mut e,
+            &req(Side::Bid, 100, 10, TimeInForce::IOC, RequestType::New, 1),
+        );
 
         assert_eq!(fill_count(&out), 0);
-        assert_eq!(reject(&out), Some((RejectReason::InsufficientLiquidity, 10)));
+        assert_eq!(
+            reject(&out),
+            Some((RejectReason::InsufficientLiquidity, 10))
+        );
         assert!(e.book(INSTR).unwrap().best_bid().is_none());
     }
 
@@ -257,10 +301,20 @@ mod tests {
         let mut e = engine_with_book();
         rest_maker(&mut e, Side::Ask, 100, 4, 1); // only 4 available, need 10
 
-        let out = run(&mut e, &req(Side::Bid, 100, 10, TimeInForce::FOK, RequestType::New, 2));
+        let out = run(
+            &mut e,
+            &req(Side::Bid, 100, 10, TimeInForce::FOK, RequestType::New, 2),
+        );
 
-        assert_eq!(fill_count(&out), 0, "FOK is all-or-nothing: no partial fills");
-        assert_eq!(reject(&out), Some((RejectReason::InsufficientLiquidity, 10)));
+        assert_eq!(
+            fill_count(&out),
+            0,
+            "FOK is all-or-nothing: no partial fills"
+        );
+        assert_eq!(
+            reject(&out),
+            Some((RejectReason::InsufficientLiquidity, 10))
+        );
         assert_eq!(
             e.book(INSTR).unwrap().best_ask().unwrap().1.total_qty(),
             4,
@@ -273,7 +327,10 @@ mod tests {
         let mut e = engine_with_book();
         rest_maker(&mut e, Side::Ask, 100, 12, 1); // more than enough
 
-        let out = run(&mut e, &req(Side::Bid, 100, 10, TimeInForce::FOK, RequestType::New, 2));
+        let out = run(
+            &mut e,
+            &req(Side::Bid, 100, 10, TimeInForce::FOK, RequestType::New, 2),
+        );
 
         assert_eq!(fill_count(&out), 2, "taker fully filled + maker partially");
         assert!(reject(&out).is_none());
@@ -290,10 +347,16 @@ mod tests {
         let mut e = engine_with_book();
         rest_maker(&mut e, Side::Ask, 110, 50, 1);
 
-        let out = run(&mut e, &req(Side::Bid, 100, 10, TimeInForce::FOK, RequestType::New, 2));
+        let out = run(
+            &mut e,
+            &req(Side::Bid, 100, 10, TimeInForce::FOK, RequestType::New, 2),
+        );
 
         assert_eq!(fill_count(&out), 0);
-        assert_eq!(reject(&out), Some((RejectReason::InsufficientLiquidity, 10)));
+        assert_eq!(
+            reject(&out),
+            Some((RejectReason::InsufficientLiquidity, 10))
+        );
         assert_eq!(e.book(INSTR).unwrap().best_ask().unwrap().1.total_qty(), 50);
     }
 
@@ -306,7 +369,10 @@ mod tests {
         let mut e = engine_with_book();
         rest_maker(&mut e, Side::Ask, 100, 10, 1);
 
-        let out = run(&mut e, &req(Side::Bid, 105, 10, TimeInForce::GTC, RequestType::New, 2));
+        let out = run(
+            &mut e,
+            &req(Side::Bid, 105, 10, TimeInForce::GTC, RequestType::New, 2),
+        );
 
         assert_eq!(fill_count(&out), 2);
         for ev in &out {
@@ -317,4 +383,47 @@ mod tests {
             }
         }
     }
+
+    // --- EventSink port ----------------------------------------------------
+
+    /// A non-`Vec` sink. Proves `process` emits through the `EventSink` port
+    /// rather than a hard-coded `Vec` — the decoupling item 1 introduced. The
+    /// `Vec` tests above can't show this, since `Vec` was the original type.
+    #[derive(Default)]
+    struct CountingSink {
+        fills: usize,
+        rejects: usize,
+        total: usize,
+    }
+
+    impl EventSink for CountingSink {
+        fn emit(&mut self, event: OrderEvent) {
+            self.total += 1;
+            match event {
+                OrderEvent::Fill { .. } | OrderEvent::PartialFill { .. } => self.fills += 1,
+                OrderEvent::Reject { .. } => self.rejects += 1,
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn emits_through_a_non_vec_sink() {
+        // Same scenario as `ioc_partial_fill_rejects_only_unfilled_remainder`,
+        // observed through a custom sink: 4 units rest, an IOC taker for 10
+        // crosses 4 (one taker + one maker fill) and rejects the 6 unfilled.
+        let mut e = engine_with_book();
+        rest_maker(&mut e, Side::Ask, 100, 4, 1);
+
+        let mut sink = CountingSink::default();
+        e.process(
+            &req(Side::Bid, 100, 10, TimeInForce::IOC, RequestType::New, 2),
+            &mut sink,
+        );
+
+        assert_eq!(sink.fills, 2, "one taker + one maker fill event");
+        assert_eq!(sink.rejects, 1, "IOC rejects the unfilled remainder");
+        assert_eq!(sink.total, 3);
+    }
 }
+
