@@ -115,6 +115,12 @@ impl Engine {
     }
 }
 
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,4 +432,3 @@ mod tests {
         assert_eq!(sink.total, 3);
     }
 }
-
