@@ -1,13 +1,15 @@
 //! Single-instrument continuous central limit order book (CLOB).
 //!
-//! [`OrderBook`] owns one [`Arena<Order>`](arena::Arena) plus two side-keyed
+//! [`OrderBook`] owns one [`Arena<OrderNode>`](arena::Arena) plus two side-keyed
 //! `BTreeMap<Price, PriceLevel>` (bids descending-by-best, asks ascending) and
 //! a `FxHashMap<IntentHash, ArenaIdx>` for O(1) cancel lookup. Each
-//! [`PriceLevel`] is a FIFO `VecDeque<ArenaIdx>` over arena handles —
-//! orders themselves live in the arena and never move.
+//! [`PriceLevel`] is an intrusive doubly-linked FIFO threaded through the
+//! arena: the level holds `head`/`tail` handles and each node carries
+//! `prev`/`next` links, so an order located by intent_hash is spliced out in
+//! O(1) with no scan. Orders live in the arena and never move.
 //!
 //! The book enforces price-time priority: the BTreeMap orders levels by price;
-//! the per-level VecDeque preserves arrival order at each price. The
+//! the per-level linked list preserves arrival order at each price. The
 //! [`TopView`] returned by `peek_top` is the read-only handle the matcher
 //! uses to inspect the resting head of either side before deciding to
 //! `pop_top` (full consumption) or `reduce_top` (partial fill).
@@ -26,5 +28,6 @@ mod level;
 #[cfg(any(debug_assertions, test))]
 mod invariants;
 
-pub use book::{OrderBook, InsertError, TopView};
+pub use book::{InsertError, OrderBook, TopView};
 pub use level::PriceLevel;
+
