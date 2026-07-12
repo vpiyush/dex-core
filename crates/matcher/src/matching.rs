@@ -118,6 +118,16 @@ pub(crate) fn match_limit(
     }
 }
 
+/// FOK gate: can the opposing side fully fill `req.quantity` at a crossing price?
+///
+/// Walks opposing *levels* (not orders) in priority order, summing
+/// `level.total_qty` until it reaches the requirement or the price stops
+/// crossing — O(L) with early exit, strictly cheaper than the fill it guards.
+/// FOK is all-or-nothing, so this must run before `cross_loop` emits anything:
+/// a failure here means zero book mutation and zero events to unwind. This is
+/// why FOK reads the book twice (level-granular verify, then order-granular
+/// fill) — the passes differ in granularity and the verify is required for
+/// atomicity, not redundant work.
 fn has_sufficient_liquidity(book: &OrderBook, req: &OrderRequest) -> bool {
     match req.side {
         Side::Bid => liquidity_reaches(
