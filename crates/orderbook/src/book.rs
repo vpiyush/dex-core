@@ -1,4 +1,7 @@
-use crate::level::{OrderNode, PriceLevel};
+use crate::{
+    cursor::LevelCursor,
+    level::{OrderNode, PriceLevel},
+};
 use arena::{Arena, ArenaIdx};
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use std::collections::BTreeMap;
@@ -267,6 +270,20 @@ impl OrderBook {
         node.order.quantity -= qty;
         level.total_qty -= qty;
 
+        #[cfg(debug_assertions)]
+        crate::invariants::assert_invariants(self);
+    }
+
+    pub fn best_level_cursor(&mut self, side: Side) -> Option<LevelCursor<'_>> {
+        let entry = match side {
+            Side::Bid => self.bids.last_entry()?,  // highest bid
+            Side::Ask => self.asks.first_entry()?, // lowest ask
+        };
+        Some(LevelCursor::new(entry, &mut self.arena, &mut self.index))
+    }
+    /// Debug-only full invariant check (I1–I7). No-op in release.
+    #[inline]
+    pub fn debug_check_invariants(&self) {
         #[cfg(debug_assertions)]
         crate::invariants::assert_invariants(self);
     }
