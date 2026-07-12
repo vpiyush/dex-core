@@ -16,7 +16,7 @@ pub enum AddInstrumentError {
 }
 
 pub struct Engine {
-    books: FxHashMap<u32, OrderBook>,
+    pub(crate) books: FxHashMap<u32, OrderBook>,
     next_order_id: u64, // monotonically increasing unique ID across all instruments
 }
 
@@ -47,6 +47,11 @@ impl Engine {
 
     pub fn book(&self, instrument_id: u32) -> Option<&OrderBook> {
         self.books.get(&instrument_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn book_mut(&mut self, instrument_id: u32) -> Option<&mut OrderBook> {
+        self.books.get_mut(&instrument_id)
     }
 
     fn mint_order_id(&mut self) -> u64 {
@@ -502,5 +507,38 @@ mod tests {
         assert_eq!(sink.fills, 2, "one taker + one maker fill event");
         assert_eq!(sink.rejects, 1, "IOC rejects the unfilled remainder");
         assert_eq!(sink.total, 3);
+    }
+
+    // --- engine invariants (M1: no crossed book at rest) -------------------
+
+    /// Build a raw resting Order, bypassing the matcher. Used only to force an
+    /// invalid (crossed) book state that `process` can never itself produce.
+    fn raw_order(side: Side, price: u64, qty: u64, hash_byte: u8) -> Order {
+        let mut h = [0u8; 32];
+        h[0] = hash_byte;
+        Order {
+            order_id: types::OrderId(hash_byte as u64),
+            price,
+            quantity: qty,
+            origin_ts: 0,
+            instrument_id: INSTR,
+            side,
+            order_type: OrderType::Limit,
+            tif: TimeInForce::GTC,
+            _padding: 0,
+            intent_hash: IntentHash(h),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "M1 violated")]
+    fn engine_invariant_catches_crossed_book() {
+        // Inject a crossed book directly (bid 105 >= ask 100). The matcher never
+        // rests a crossing order, so this state is only reachable by bypassing it.
+        let mut e = engine_with_book();
+        let book = e.book_mut(INSTR).unwrap();
+        book.insert(raw_order(Side::Bid, 105, 10, 1)).unwrap();
+        book.insert(raw_order(Side::Ask, 100, 10, 2)).unwrap();
+        crate::invariants::assert_invariants(&e);
     }
 }
