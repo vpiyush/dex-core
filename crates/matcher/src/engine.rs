@@ -390,6 +390,78 @@ mod tests {
         }
     }
 
+    #[test]
+    fn taker_sweeps_multiple_makers_at_one_level_in_fifo() {
+        // Three asks rest at the same price; a taker eats through them head-first.
+        // Exercises the cursor's inner loop (two pop_heads then a reduce_head) and
+        // proves price-time (FIFO) order among makers at a single level.
+        let mut e = engine_with_book();
+        rest_maker(&mut e, Side::Ask, 100, 4, 1); // oldest
+        rest_maker(&mut e, Side::Ask, 100, 3, 2);
+        rest_maker(&mut e, Side::Ask, 100, 5, 3); // newest
+
+        let out = run(
+            &mut e,
+            &req(Side::Bid, 100, 10, TimeInForce::IOC, RequestType::New, 9),
+        );
+
+        // 4 + 3 + 3 = 10 filled across three trades → 6 fill events.
+        assert_eq!(fill_count(&out), 6);
+        assert!(reject(&out).is_none(), "taker fully filled, nothing to reject");
+
+        // Maker events (intent_hash != taker's 9) must appear oldest-first: 1,2,3.
+        let maker_seq: Vec<u8> = out
+            .iter()
+            .filter_map(|ev| {
+                let ih = match ev {
+                    OrderEvent::Fill { intent_hash, .. }
+                    | OrderEvent::PartialFill { intent_hash, .. } => intent_hash.0[0],
+                    _ => return None,
+                };
+                (ih != 9).then_some(ih)
+            })
+            .collect();
+        assert_eq!(maker_seq, vec![1, 2, 3], "makers consumed in FIFO order");
+
+        // Maker 3 (qty 5) was only partially hit (3 of 5) → 2 remain at the level.
+        assert_eq!(e.book(INSTR).unwrap().best_ask().unwrap().1.total_qty(), 2);
+    }
+
+    #[test]
+    fn taker_sweeps_across_price_levels_best_first() {
+        // Two ask levels; an aggressive bid crosses both. Exercises the cursor's
+        // outer loop: drain level 100, `finish` drops it, re-descend to level 101.
+        // The cheaper ask must fill first (price priority).
+        let mut e = engine_with_book();
+        rest_maker(&mut e, Side::Ask, 100, 5, 1); // better (lower) ask
+        rest_maker(&mut e, Side::Ask, 101, 5, 2);
+
+        let out = run(
+            &mut e,
+            &req(Side::Bid, 101, 8, TimeInForce::IOC, RequestType::New, 9),
+        );
+
+        // 5 @100 (level drains) + 3 @101 (partial) = 8 → 4 fill events.
+        assert_eq!(fill_count(&out), 4);
+        assert!(reject(&out).is_none());
+
+        // Fill prices in emission order prove best-price-first: 100,100,101,101.
+        let prices: Vec<u64> = out
+            .iter()
+            .filter_map(|ev| match ev {
+                OrderEvent::Fill { fill_price, .. }
+                | OrderEvent::PartialFill { fill_price, .. } => Some(*fill_price),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prices, vec![100, 100, 101, 101]);
+
+        // Level 100 fully drained and removed; 2 remain at 101.
+        let book = e.book(INSTR).unwrap();
+        assert_eq!(book.best_ask().unwrap().0, 101, "100 level gone");
+        assert_eq!(book.best_ask().unwrap().1.total_qty(), 2);
+    }
+
     // --- EventSink port ----------------------------------------------------
 
     /// A non-`Vec` sink. Proves `process` emits through the `EventSink` port
