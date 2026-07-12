@@ -48,6 +48,7 @@ impl ArenaIdx {
 }
 
 use core::mem::MaybeUninit;
+use std::u32;
 
 // the largest capacity arena accepts
 pub const MAX_CAPACITY: u32 = u32::MAX - 1;
@@ -83,21 +84,23 @@ impl<T> Arena<T> {
         let _ = Self::ASSERT_T_LAYOUT;
         assert!(capacity > 0 && capacity < u32::MAX, "invalid capacity");
         // create the memory directly into heap
-        let mut slots: Vec<Slot<T>> = (0..capacity)
-            .map(|_| Slot {
-                generation: 1,
-                occupied: 0,
-                value: MaybeUninit::uninit(),
+
+        let slots: Box<[Slot<T>]> = (0..capacity)
+            .map(|i| {
+                let mut slot = Slot {
+                    generation: 1,
+                    occupied: 0,
+                    value: MaybeUninit::uninit(),
+                };
+                let next = if i + 1 < capacity { i + 1 } else { u32::MAX };
+                // write next
+                unsafe { slot.write_next_free(next) }
+                slot
             })
             .collect();
 
-        for i in 0..capacity {
-            let next_idx = if i + 1 < capacity { i + 1 } else { u32::MAX };
-            // write next
-            unsafe { slots[i as usize].write_next_free(next_idx) }
-        }
         Self {
-            slots: slots.into_boxed_slice(),
+            slots,
             free_head: 0,
             len: 0,
         }
@@ -123,12 +126,12 @@ impl<T> Arena<T> {
 
     pub fn alloc(&mut self, value: T) -> Option<ArenaIdx> {
         // todo: full arena handling, should we overwrite the old values ?
-        if self.len >= MAX_CAPACITY as usize || self.free_head == u32::MAX {
+        if self.free_head == u32::MAX {
             return None;
         }
 
         let slot_idx = self.free_head;
-        let slot = &mut self.slots[slot_idx as usize];
+        let slot = unsafe { self.slots.get_unchecked_mut(slot_idx as usize) };
         let next_free_slot = unsafe { slot.read_next_free() };
         let generation = slot.generation;
         slot.insert(value);
@@ -468,4 +471,3 @@ mod tests {
         assert_eq!(arena.len, 0, "len underflowed on stale remove");
     }
 }
-
