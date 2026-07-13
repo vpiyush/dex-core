@@ -22,20 +22,16 @@ use types::{Order, OrderEvent, OrderId, OrderRequest, RejectReason, Side, TimeIn
 
 /// Match a limit order against the opposite side, then apply its time-in-force residual policy.
 ///
-/// # Algorithm - level-cursor cross loop
+/// # Algorithm - per-order cross loop
 ///
-/// 1. Open a `LevelCursor` on the opposing best level (one BTreeMap descent).
-/// 2. If that level crosses the taker's price, fill its resting orders
-///    head-first at `min(remaining, maker.qty)`, always at the maker's price.
-///    Every order at a level shares one price, so the cross is checked once per
-///    level, not once per order.
-/// 3. Emit a fill event per party per trade (`Fill` when that side is fully
-///    consumed, `PartialFill` otherwise).
-/// 4. `pop_head` when the maker is fully consumed, `reduce_head` on the partial
-///    that exhausts the taker.
-/// 5. When a level drains, `finish` drops it and the loop re-descends to the
-///    next-best level. Repeat until the taker is exhausted, the opposing side is
-///    empty, or the best opposing level no longer crosses.
+/// 1. peek the opposing top.
+/// 2. If it crosses the taker's price. fill `min(remaining, maker.qty)`
+///    at the maker's price.
+/// 3. Emit the fill event for each side (`Fill` if that side is fully
+///    consumed or `PartialFill` otherwise.
+/// 4. `pop_top` if the maker is fully consumed, else `reduce_top`
+/// 5. Repeat from 1. until the taker is fully exhausted or no more orders
+///    to cross.
 /// 6. Apply the time-in-force residual policy to any unfilled quantity:
 ///    - GTC: rest on the book, emit `New` (insert failures surface as a
 ///      Reject for the unfilled portion).
@@ -44,15 +40,18 @@ use types::{Order, OrderEvent, OrderId, OrderRequest, RejectReason, Side, TimeIn
 ///      can survive (reject up front if the book can't fully fill).
 ///
 /// # Complexity
-/// O(N + L Log L) where N = resting orders consumed and L = opposing price
-/// levels touched. One BTreeMap descent per level (via the cursor), not per
-/// order; each consumed order is O(1) (arena free + link advance + aggregate
-/// update). Event emission is O(N) into `out`.
+/// O(N Log L) where N = resting order's consumed, L = price levels on the
+/// opposite side. Each consumed order costs 2 BtreeMap accesses (one `peek_top`
+/// and one `pop_top`/`reduce_top`. Event emission is O(N) into out. arena operations
+/// are O(1) per order.
 ///
 /// # known follow-up(improvement)
-/// 1. if remaining >= level.total_qty the whole level fills — the per-order
-///    aggregate bookkeeping could collapse into a single bulk drain. Marginal
-///    on top of the cursor; try after benchmarks.
+/// 1. if the remaining >= level.total_quantity, the whole level can be consumed at once
+///    reducing complexity to O(L Log L), try after benchmarks
+/// 2. pushing to out vector is not ideal from performance point of view, there are two
+///    possible alternatives.
+///    - direct use the seqlock ipc here, but increase coupling with different crate.
+///    - use an event sink, can caller can choose where it lands. - resolved
 ///
 pub(crate) fn match_limit(
     book: &mut OrderBook,
@@ -70,10 +69,6 @@ pub(crate) fn match_limit(
     }
 
     let remaining = cross_loop(book, req, order_id, out);
-    // Cursor mutations skip the book's per-op invariant check (a half-drained
-    // level transiently sits empty in the map until finish); assert the settled
-    // book here. No-op in release.
-    book.debug_check_invariants();
     if remaining == 0 {
         return;
     }
@@ -165,15 +160,14 @@ fn liquidity_reaches(
     false
 }
 
-/// Shared cross loop driven by [`match_limit`].
+/// Shared per-order cross loop driven by [`match_limit`].
 ///
-/// Two nested loops. The outer opens a `LevelCursor` on the opposing best level
-/// (one BTreeMap descent) and checks the cross once for the whole level. The
-/// inner walks that level's intrusive list, filling head orders in O(1) each
-/// (`pop_head` on full consumption, `reduce_head` on the taker-exhausting
-/// partial). When a level drains, `finish` drops it and the outer loop descends
-/// to the next-best level. Continues until the taker is exhausted, the opposing
-/// side is empty, or the best opposing level no longer crosses.
+/// Walks the opposing side of the book one resting order at a time, filling
+/// `min(remaining, maker.qty)` at the maker's price. Emits one fill event
+/// per party per trade (taker + maker) and mutates the book (`pop_top` for
+/// full consumption, `reduce_top` for partial). Continues until the taker
+/// is exhausted, the opposing side is empty, or `req.price` no longer crosses
+/// the opposing top.
 ///
 /// Returns the unfilled remaining quantity. The caller applies the
 /// time-in-force residual policy (GTC rests, IOC rejects the remainder).
@@ -186,77 +180,68 @@ fn cross_loop(
     let opposite = opposite(req.side);
     let mut remaining = req.quantity;
 
-    // Outer loop: one cursor (one BTreeMap descent) per opposing level.
     while remaining > 0 {
-        let Some(mut cursor) = book.best_level_cursor(opposite) else {
-            break; // opposing side empty
-        };
-        // Every order at this level shares one price — cross once, not per order.
-        if !crossing(req.side, req.price, cursor.price()) {
-            break; // best level doesn't cross, so no worse level will either
-        }
-        let fill_price = cursor.price();
-
-        // Inner loop: walk this level's intrusive list, O(1) per resting order.
-        while remaining > 0 {
-            let Some(maker) = cursor.head() else {
-                break; // level drained
+        let (maker_price, maker_qty, maker_id, maker_intent) = {
+            let Some(top) = book.peek_top(opposite) else {
+                break;
             };
-            // Copy the maker's fields out before mutating through the cursor.
-            let maker_qty = maker.quantity;
-            let maker_id = maker.order_id.0;
-            let maker_intent = maker.intent_hash;
-
-            let fill_qty = remaining.min(maker_qty);
-            let maker_remaining = maker_qty - fill_qty;
-            remaining -= fill_qty;
-
-            // Taker fill event
-            if remaining == 0 {
-                out.emit(OrderEvent::Fill {
-                    id: order_id,
-                    fill_qty,
-                    fill_price,
-                    origin_ts: req.origin_ts,
-                    intent_hash: req.intent_hash,
-                });
-            } else {
-                out.emit(OrderEvent::PartialFill {
-                    id: order_id,
-                    fill_qty,
-                    fill_price,
-                    remaining_qty: remaining,
-                    origin_ts: req.origin_ts,
-                    intent_hash: req.intent_hash,
-                });
+            if !crossing(req.side, req.price, top.price) {
+                break;
             }
+            (
+                top.price,
+                top.order.quantity,
+                top.order.order_id.0,
+                top.order.intent_hash,
+            )
+        };
 
-            // Maker fill event + book mutation
-            if maker_remaining == 0 {
-                out.emit(OrderEvent::Fill {
-                    id: maker_id,
-                    fill_qty,
-                    fill_price,
-                    origin_ts: req.origin_ts,
-                    intent_hash: maker_intent,
-                });
-                if !cursor.pop_head() {
-                    break; // level now empty
-                }
-            } else {
-                out.emit(OrderEvent::PartialFill {
-                    id: maker_id,
-                    fill_qty,
-                    fill_price,
-                    remaining_qty: maker_remaining,
-                    origin_ts: req.origin_ts,
-                    intent_hash: maker_intent,
-                });
-                cursor.reduce_head(fill_qty);
-                break; // maker_remaining > 0 means the taker is exhausted
-            }
+        let fill_qty = remaining.min(maker_qty);
+        let fill_price = maker_price;
+        let maker_remaining = maker_qty - fill_qty;
+        remaining -= fill_qty;
+
+        // Taker fill event
+        if remaining == 0 {
+            out.emit(OrderEvent::Fill {
+                id: order_id,
+                fill_qty,
+                fill_price,
+                origin_ts: req.origin_ts,
+                intent_hash: req.intent_hash,
+            });
+        } else {
+            out.emit(OrderEvent::PartialFill {
+                id: order_id,
+                fill_qty,
+                fill_price,
+                remaining_qty: remaining,
+                origin_ts: req.origin_ts,
+                intent_hash: req.intent_hash,
+            });
         }
-        cursor.finish(); // drops the level from the book iff it drained
+
+        // Maker fill event + book mutation
+        if maker_remaining == 0 {
+            out.emit(OrderEvent::Fill {
+                id: maker_id,
+                fill_qty,
+                fill_price,
+                origin_ts: req.origin_ts,
+                intent_hash: maker_intent,
+            });
+            book.pop_top(opposite);
+        } else {
+            out.emit(OrderEvent::PartialFill {
+                id: maker_id,
+                fill_qty,
+                fill_price,
+                remaining_qty: maker_remaining,
+                origin_ts: req.origin_ts,
+                intent_hash: maker_intent,
+            });
+            book.reduce_top(opposite, fill_qty);
+        }
     }
 
     remaining

@@ -398,8 +398,8 @@ mod tests {
     #[test]
     fn taker_sweeps_multiple_makers_at_one_level_in_fifo() {
         // Three asks rest at the same price; a taker eats through them head-first.
-        // Exercises the cursor's inner loop (two pop_heads then a reduce_head) and
-        // proves price-time (FIFO) order among makers at a single level.
+        // Proves price-time (FIFO) order among makers at a single level: two full
+        // consumptions (pop_top) then a partial (reduce_top).
         let mut e = engine_with_book();
         rest_maker(&mut e, Side::Ask, 100, 4, 1); // oldest
         rest_maker(&mut e, Side::Ask, 100, 3, 2);
@@ -434,9 +434,8 @@ mod tests {
 
     #[test]
     fn taker_sweeps_across_price_levels_best_first() {
-        // Two ask levels; an aggressive bid crosses both. Exercises the cursor's
-        // outer loop: drain level 100, `finish` drops it, re-descend to level 101.
-        // The cheaper ask must fill first (price priority).
+        // Two ask levels; an aggressive bid crosses both. The cheaper ask (level
+        // 100) must fully fill before level 101 is touched (price priority).
         let mut e = engine_with_book();
         rest_maker(&mut e, Side::Ask, 100, 5, 1); // better (lower) ask
         rest_maker(&mut e, Side::Ask, 101, 5, 2);
