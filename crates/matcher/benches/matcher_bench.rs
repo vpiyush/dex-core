@@ -12,7 +12,10 @@
 //! Headline numbers this file surfaces:
 //!   1. Engine-wrapper overhead: `rest_new_level` vs `raw_book_insert` (same
 //!      setup, no Engine) = validation + hashmap + mint + dispatch + event emit.
-//!   2. Per-level marginal cross cost: slope of `cross_n` over n in {1, 4, 16}.
+//!   2. Level-cursor effect, bounded from both sides: `cross_n` (thin, one order
+//!      per level) is the cursor's worst case (fixed per-level cost, nothing to
+//!      amortize); `cross_deep_m` (many orders at one touch level in a deep book)
+//!      is its target (one descent amortized across m O(1) fills).
 //!   3. FOK pre-check cost: `fok_success_n` − `cross_n` (happy-path overhead);
 //!      `fok_fail_deep` − `fok_fail_fast` (cost of the O(L) liquidity walk).
 //!
@@ -27,7 +30,7 @@ use types::{IntentHash, OrderEvent, OrderRequest, OrderType, RequestType, Side, 
 const INSTR: u32 = 1;
 const STD: Iters = Iters::STANDARD; // 100k / 1M — cheap ops
 const CROSS: Iters = Iters::LIGHT; // 50k / 500k — ops with per-iter setup
-const EVENT_BUF_CAP: usize = 128;
+const EVENT_BUF_CAP: usize = 256; // headroom for deep sweeps: 2 events per fill
 
 // --- domain fixtures --------------------------------------------------------
 
@@ -116,9 +119,13 @@ fn rest_existing_level(r: &Runner) -> Sample {
     )
 }
 
-// cross_n: each iter rests `n` asks (untimed prepare), then times one taker that
-// crosses all n. IOC fully fills (pure cross); FOK adds the liquidity pre-check,
-// so fok_success_n − cross_n is the happy-path pre-check overhead.
+// cross_n: each iter rests `n` asks at n DISTINCT prices (one order per level),
+// then times a taker that crosses all n. This is the level cursor's NO-
+// amortization case: every level holds a single order, so the cursor opens a
+// level, pops the one order, drops the level, and re-descends — paying its fixed
+// per-level cost with nothing to spread it over. Contrast `cross_touch_depth`,
+// which stacks many orders at one level (the cursor's target). IOC fully fills;
+// FOK adds the pre-check, so fok_success_n − cross_n is the happy-path overhead.
 fn cross(r: &Runner, label: &str, n: u64, tif: TimeInForce) -> Sample {
     struct St { book: Book, seed: u64 }
     let mut st = St { book: Book::new(65_536), seed: 0 };
@@ -133,6 +140,52 @@ fn cross(r: &Runner, label: &str, n: u64, tif: TimeInForce) -> Sample {
                 st.book.process(&ask);
             }
             let taker = req(Side::Bid, 100 + n, n, tif, RequestType::New, st.seed);
+            st.seed += 1;
+            taker
+        },
+        |st, taker| {
+            st.book.buf.clear();
+            st.book.engine.process(&taker, &mut st.book.buf);
+        },
+    )
+}
+
+// cross_touch_depth: the level cursor's TARGET case. A one-time background of
+// `bg` ask levels (one order each, above the touch) makes the asks BTreeMap
+// L = bg+1 deep, so a per-order descent costs O(log L). Each iter rebuilds the
+// touch level with `m` orders stacked at the best price, then times a taker that
+// crosses all `m`. Old path: m × (peek + pop) re-descends the L-level tree per
+// order. Cursor: one descent to open the level, then O(1) per order. The gain
+// scales with both m and L — this is the mirror of `cross_n`'s worst case.
+fn cross_touch_depth(r: &Runner, label: &str, m: u64, bg: u64) -> Sample {
+    struct St {
+        book: Book,
+        seed: u64,
+    }
+    let mut st = St {
+        book: Book::new(262_144),
+        seed: 0,
+    };
+    // one-time background: `bg` ask levels above the touch, never crossed, so the
+    // asks tree stays deep for the whole run.
+    for lvl in 0..bg {
+        let ask = req(Side::Ask, 101 + lvl, 1, TimeInForce::GTC, RequestType::New, st.seed);
+        st.seed += 1;
+        st.book.process(&ask);
+    }
+    r.bench(
+        label,
+        CROSS,
+        &mut st,
+        |st, _i| {
+            // rebuild the touch level: m orders stacked at price 100 (new min ask).
+            for _ in 0..m {
+                let ask = req(Side::Ask, 100, 1, TimeInForce::GTC, RequestType::New, st.seed);
+                st.seed += 1;
+                st.book.process(&ask);
+            }
+            // taker crosses exactly the m touch orders (100 < every bg level).
+            let taker = req(Side::Bid, 100, m, TimeInForce::IOC, RequestType::New, st.seed);
             st.seed += 1;
             taker
         },
@@ -373,6 +426,9 @@ fn main() -> std::io::Result<()> {
     let cross1 = cross(&runner, "cross_n=1", 1, TimeInForce::IOC);
     let cross4 = cross(&runner, "cross_n=4", 4, TimeInForce::IOC);
     let cross16 = cross(&runner, "cross_n=16", 16, TimeInForce::IOC);
+    // deep-level sweeps: m orders at the touch inside a ~1025-level book.
+    let deep16 = cross_touch_depth(&runner, "cross_deep_m=16", 16, 1024);
+    let deep64 = cross_touch_depth(&runner, "cross_deep_m=64", 64, 1024);
     let fok1 = cross(&runner, "fok_success_n=1", 1, TimeInForce::FOK);
     let fok4 = cross(&runner, "fok_success_n=4", 4, TimeInForce::FOK);
     let fok16 = cross(&runner, "fok_success_n=16", 16, TimeInForce::FOK);
@@ -391,13 +447,15 @@ fn main() -> std::io::Result<()> {
     report
         .section("Resting (no cross)", &[&rest_new, &rest_exist])
         .section("Reference — raw orderbook (no Engine)", &[&raw])
-        .section("Crossing", &[&cross1, &cross4, &cross16])
+        .section("Crossing — thin (1 order/level, cursor worst case)", &[&cross1, &cross4, &cross16])
+        .section("Crossing — deep touch, L≈1025 (cursor target)", &[&deep16, &deep64])
         .section("FOK gate", &[&fok1, &fok4, &fok16, &fok_fast, &fok_deep])
         .section("Reject floor", &[&ioc_dry])
         .section("Cancel", &[&c_hit, &c_miss])
         .section("Combined / composite", &[&partial, &realistic])
         .delta("Engine wrapper overhead", &rest_new, &raw, Delta::Sub, "rest_new_level − raw_book_insert")
-        .delta("Marginal cost / level swept", &cross16, &cross1, Delta::SubPerN(15), "(cross_n=16 − cross_n=1) / 15")
+        .delta("Marginal cost / thin level swept", &cross16, &cross1, Delta::SubPerN(15), "(cross_n=16 − cross_n=1) / 15")
+        .delta("Marginal cost / deep-level fill", &deep64, &deep16, Delta::SubPerN(48), "(cross_deep_m=64 − cross_deep_m=16) / 48")
         .delta("FOK pre-check overhead (16 lvl)", &fok16, &cross16, Delta::Sub, "fok_success_n=16 − cross_n=16")
         .delta("FOK liquidity walk (16 lvl)", &fok_deep, &fok_fast, Delta::Sub, "fok_fail_deep − fok_fail_fast");
 

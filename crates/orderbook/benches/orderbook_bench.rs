@@ -5,11 +5,14 @@
 //! benchkit supplies the warmup/measure `rdtscp` fence, env detection, and
 //! report rendering; this file supplies only the scenarios.
 //!
-//! The headline comparison is `cancel_oldest` vs `cancel_random`: identical
-//! workload except cancel order, isolating the cost of the O(level-depth) scan
-//! in the current VecDeque-based cancel path. `cancel_random` uses the same
-//! `Lcg` seed (0xCAFE_F00D) as the matcher's `cancel_hit` so the access patterns
-//! line up for cross-crate subtraction.
+//! The `cancel_oldest` vs `cancel_random` pair is identical workload except
+//! cancel order. With the intrusive-DLL cancel (review item 2) both are O(1)
+//! splices, so the remaining gap is memory locality: `cancel_oldest` frees arena
+//! slots and DLL neighbours in allocation order (cache-warm), while
+//! `cancel_random` hits them shuffled (a miss per cancel). The scan the old
+//! VecDeque path paid is gone — that improvement shows in a before/after A/B, not
+//! in this within-run gap. `cancel_random` uses the same `Lcg` seed
+//! (0xCAFE_F00D) as the matcher's `cancel_hit` so the access patterns line up.
 
 use benchkit::{Iters, Lcg, Report, RunEnv, Runner, Sample};
 use std::hint::black_box;
@@ -114,8 +117,9 @@ fn build_deep_book(n: usize) -> (OrderBook, Vec<IntentHash>) {
     (book, hashes)
 }
 
-// cancel_oldest: cancel in insertion (FIFO) order → each cancel hits position 0
-// of its level's VecDeque; iter().position() returns immediately. Best case.
+// cancel_oldest: cancel in insertion (FIFO) order → each cancel splices the level
+// head and frees arena slots in allocation order (sequential, cache-warm).
+// O(1) splice; the cache-friendliest case.
 fn cancel_oldest(r: &Runner) -> Sample {
     let n = STD.total() + LEVEL_DEPTH;
     let (book, hashes) = build_deep_book(n);
@@ -129,9 +133,10 @@ fn cancel_oldest(r: &Runner) -> Sample {
     )
 }
 
-// cancel_random: same setup, shuffled cancel order → hits random positions in the
-// level, so iter().position() averages O(LEVEL_DEPTH/2). The decision-relevant
-// bench; cancel_random.p50 / cancel_oldest.p50 is the scan-cost ratio.
+// cancel_random: same setup, shuffled cancel order → splices interior nodes and
+// frees arena slots in random order (a cache miss per cancel, plus the DLL
+// neighbour pointer-chase). Still O(1); the gap over cancel_oldest is the
+// locality cost, not a scan.
 fn cancel_random(r: &Runner) -> Sample {
     let n = STD.total() + LEVEL_DEPTH;
     let (book, mut hashes) = build_deep_book(n);
@@ -208,22 +213,23 @@ fn main() -> std::io::Result<()> {
     let realistic = realistic_workload(&runner);
 
     let scope = "single OrderBook op (insert / pop_top / cancel); \
-                 BTreeMap levels + VecDeque orders + arena slots, no Engine, no I/O.";
+                 BTreeMap levels + intrusive-DLL orders + arena slots, no Engine, no I/O.";
     let mut report = Report::new(&env, "OrderBook benchmark", scope);
     report
         .section("Insert", &[&ins_new, &ins_exist])
         .section("Consume (matcher hot path)", &[&pop])
-        .section("Cancel (scan-cost comparison)", &[&c_oldest, &c_random])
+        .section("Cancel (locality comparison, both O(1))", &[&c_oldest, &c_random])
         .section("Composite", &[&realistic]);
 
-    // Headline: the scan-cost ratio that decides the linked-list optimization.
-    // Reported as a delta (random − oldest) in ns; the ratio is read from p50s.
+    // Post-DLL both cancels are O(1); the delta (random − oldest) is the memory-
+    // locality cost of interior cancel, not a scan. The scan-removal win lives in
+    // the before/after A/B against the pre-item-2 commit, not this within-run gap.
     report.delta(
-        "Cancel scan cost (random − oldest)",
+        "Cancel locality cost (random − oldest)",
         &c_random,
         &c_oldest,
         benchkit::Delta::Sub,
-        "extra p50 ns from O(depth/2) VecDeque scan vs FIFO hit",
+        "extra p50 ns from random arena/DLL-neighbour access vs sequential (both O(1))",
     );
 
     let paths = report.write_run("orderbook")?;
